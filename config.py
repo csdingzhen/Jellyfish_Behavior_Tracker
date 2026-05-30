@@ -20,7 +20,7 @@ VIDEO_DIR = Path(r"D:\Jellyfish\data")   # default: project data/ folder
 # ── Model weights ─────────────────────────────────────────────────────────────
 WEIGHTS_DIR  = ROOT / "weights"
 SAM2_WEIGHTS = WEIGHTS_DIR / "sam2" / "sam2.1_hiera_base_plus.pt"
-SAM2_CONFIG  = "sam2.1_hiera_b+"     # short name used by sam2 build API
+SAM2_CONFIG  = "configs/sam2.1/sam2.1_hiera_b+.yaml"   # path used by build_sam2_video_predictor
 COTRACKER_WEIGHTS = WEIGHTS_DIR / "cotracker" / "scaled_offline.pth"
 
 # ── Cached pipeline outputs ───────────────────────────────────────────────────

@@ -218,14 +218,14 @@ def render_video(
             for i in range(trail_start, sample_idx):
                 alpha = (i - trail_start) / TRAIL_LEN
                 c = tuple(round(v * alpha) for v in COLOR_TRAIL)
-                cv2.circle(frame, (round(tracks[i, 0]), round(tracks[i, 1])), 2, c, -1)
+                cv2.circle(frame, (round(tracks[i, 0]), round(tracks[i, 1])), 1, c, -1)
 
             # Current point
             cx, cy = round(tracks[sample_idx, 0]), round(tracks[sample_idx, 1])
             vis    = bool(visible[sample_idx])
             color  = COLOR_VIS if vis else COLOR_OCCL
-            cv2.circle(frame, (cx, cy), 8, color, -1)
-            cv2.circle(frame, (cx, cy), 10, (255, 255, 255), 1)
+            cv2.circle(frame, (cx, cy), 4, color, -1)
+            cv2.circle(frame, (cx, cy), 5, (255, 255, 255), 1)
 
             # HUD overlay
             label = f"f{raw_idx:05d}  ({cx},{cy})  {'VIS' if vis else 'occl'}"
