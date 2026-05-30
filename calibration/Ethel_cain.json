@@ -1,0 +1,163 @@
+{
+  "centroid_px": [
+    1380,
+    2148
+  ],
+  "dye_px": [
+    1017,
+    2007
+  ],
+  "phi_dye_lab_deg": -158.772,
+  "n_rhopalia": 16,
+  "rhopalia": [
+    {
+      "id": 0,
+      "px": [
+        2097,
+        2701
+      ],
+      "phi_lab_deg": 37.642,
+      "phi_body_deg": -163.586
+    },
+    {
+      "id": 1,
+      "px": [
+        1843,
+        2932
+      ],
+      "phi_lab_deg": 59.436,
+      "phi_body_deg": -141.792
+    },
+    {
+      "id": 2,
+      "px": [
+        1489,
+        3087
+      ],
+      "phi_lab_deg": 83.379,
+      "phi_body_deg": -117.849
+    },
+    {
+      "id": 3,
+      "px": [
+        1117,
+        3056
+      ],
+      "phi_lab_deg": 106.154,
+      "phi_body_deg": -95.074
+    },
+    {
+      "id": 4,
+      "px": [
+        804,
+        2880
+      ],
+      "phi_lab_deg": 128.199,
+      "phi_body_deg": -73.029
+    },
+    {
+      "id": 5,
+      "px": [
+        530,
+        2572
+      ],
+      "phi_lab_deg": 153.489,
+      "phi_body_deg": -47.739
+    },
+    {
+      "id": 6,
+      "px": [
+        446,
+        2200
+      ],
+      "phi_lab_deg": 176.813,
+      "phi_body_deg": -24.414
+    },
+    {
+      "id": 7,
+      "px": [
+        495,
+        1843
+      ],
+      "phi_lab_deg": -160.984,
+      "phi_body_deg": -2.212
+    },
+    {
+      "id": 8,
+      "px": [
+        631,
+        1596
+      ],
+      "phi_lab_deg": -143.61,
+      "phi_body_deg": 15.162
+    },
+    {
+      "id": 9,
+      "px": [
+        916,
+        1388
+      ],
+      "phi_lab_deg": -121.405,
+      "phi_body_deg": 37.367
+    },
+    {
+      "id": 10,
+      "px": [
+        1210,
+        1270
+      ],
+      "phi_lab_deg": -100.958,
+      "phi_body_deg": 57.814
+    },
+    {
+      "id": 11,
+      "px": [
+        1552,
+        1290
+      ],
+      "phi_lab_deg": -78.664,
+      "phi_body_deg": 80.108
+    },
+    {
+      "id": 12,
+      "px": [
+        1837,
+        1400
+      ],
+      "phi_lab_deg": -58.577,
+      "phi_body_deg": 100.196
+    },
+    {
+      "id": 13,
+      "px": [
+        2105,
+        1610
+      ],
+      "phi_lab_deg": -36.578,
+      "phi_body_deg": 122.194
+    },
+    {
+      "id": 14,
+      "px": [
+        2258,
+        1953
+      ],
+      "phi_lab_deg": -12.522,
+      "phi_body_deg": 146.25
+    },
+    {
+      "id": 15,
+      "px": [
+        2252,
+        2350
+      ],
+      "phi_lab_deg": 13.043,
+      "phi_body_deg": 171.815
+    }
+  ],
+  "source_image": "D:\\Jellyfish\\data\\Ethel_cain.jpg",
+  "image_size_px": [
+    3024,
+    4032
+  ]
+}

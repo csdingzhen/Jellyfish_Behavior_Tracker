@@ -39,3 +39,8 @@ weights/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# Calibration — keep JSON and annotated PNGs (small, scientifically important)
+# Only exclude raw hi-res source images if they are large
+calibration/*.tiff
+calibration/*.tif
