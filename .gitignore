@@ -1,12 +1,41 @@
-/src
+# Virtual environment
+venv/
+.venv/
 
-#LLM and vscode file
+# LLM and editor
 .vscode/
 .claude/
 
-#environment
+# Environment secrets
 .env
 
-#system
+# System
 .DS_Store
+Thumbs.db
 
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Video and image data — keep out of git (use VIDEO_DIR in config.py instead)
+data/*.mp4
+data/*.avi
+data/*.mov
+data/*.mkv
+data/*.tiff
+data/*.tif
+data/*.png
+data/*.jpg
+
+# Pipeline outputs — large cached arrays, plots
+outputs/
+
+# Model weights — large binary files
+weights/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

@@ -1,0 +1,17 @@
+# Core scientific stack
+numpy>=1.26
+scipy>=1.13
+matplotlib>=3.9
+Pillow>=10.0
+
+# Computer vision
+opencv-python>=4.10
+imageio>=2.34
+imageio-ffmpeg>=0.5
+
+# Utilities
+tqdm>=4.66
+einops>=0.8
+
+# NOTE: PyTorch + CUDA and model packages are installed by setup.ps1
+# because they need a special index URL and install order.
