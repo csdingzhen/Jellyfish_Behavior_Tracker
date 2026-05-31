@@ -129,6 +129,10 @@ def extract_frames(video_path: Path, out_dir: Path, stride: int) -> int:
 
 # ── Mask utilities ────────────────────────────────────────────────────────────
 
+N_CONTOUR_ANGLES = 360   # angular resolution of the bell contour
+N_CONTOUR_RADII  = 256   # radial resolution for polar warp
+
+
 def mask_to_stats(mask_bool: np.ndarray) -> tuple[float, float, float]:
     """Return (cx, cy, equiv_radius) from a boolean mask using image moments."""
     m = cv2.moments(mask_bool.astype(np.uint8))
@@ -138,6 +142,42 @@ def mask_to_stats(mask_bool: np.ndarray) -> tuple[float, float, float]:
     cy     = m["m01"] / m["m00"]
     radius = math.sqrt(m["m00"] / math.pi)
     return cx, cy, radius
+
+
+def mask_to_contour(mask_bool: np.ndarray, cx: float, cy: float,
+                    radius: float) -> np.ndarray:
+    """
+    Compute the bell boundary radial profile r(θ) using polar warp.
+
+    For each angle θ (0..359°), returns the distance in pixels from the
+    centroid to the outermost mask pixel at that angle.
+
+    Returns float32 array of shape (N_CONTOUR_ANGLES,).
+    A value of 0 means no mask pixel at that angle.
+    """
+    if radius <= 0:
+        return np.zeros(N_CONTOUR_ANGLES, dtype=np.float32)
+
+    max_r = radius * 1.15   # slightly beyond expected bell edge
+    polar = cv2.warpPolar(
+        mask_bool.astype(np.float32),
+        dsize=(N_CONTOUR_RADII, N_CONTOUR_ANGLES),   # (width=radii, height=angles)
+        center=(cx, cy),
+        maxRadius=max_r,
+        flags=cv2.WARP_POLAR_LINEAR,
+    )
+    # polar: (N_CONTOUR_ANGLES, N_CONTOUR_RADII)
+    # polar[θ, r] = mask value at angle θ, radius index r
+
+    # For each angle, find outermost mask pixel (last column > 0.5)
+    above = polar > 0.5                             # bool (angles, radii)
+    has_mask = above.any(axis=1)                    # (angles,)
+    # Flip so argmax finds the LAST True → outermost pixel
+    last_idx = (N_CONTOUR_RADII - 1) - np.argmax(above[:, ::-1], axis=1)
+    # Convert from polar-index to actual pixels
+    r_pixels = last_idx.astype(np.float32) * max_r / N_CONTOUR_RADII
+    r_pixels[~has_mask] = 0.0
+    return r_pixels
 
 
 # ── SAM2 windowed propagation ─────────────────────────────────────────────────
@@ -150,7 +190,7 @@ def run_sam2(
     total_frames: int,
     window_size: int,
     save_indices: set[int],
-) -> list[tuple[float, float, float]]:
+) -> tuple[list[tuple[float, float, float]], np.ndarray]:
     """
     Propagate SAM2 through all frames using non-overlapping windows.
 
@@ -158,12 +198,16 @@ def run_sam2(
     The last mask of each window is passed as a mask prompt to the next.
 
     Only frames whose index is in save_indices are written to disk as PNGs.
-    Centroid stats are computed and returned for every frame regardless.
+    Centroid stats and bell contour radii are computed for every frame.
 
-    Returns list[(cx, cy, radius)] indexed by extracted-frame index.
+    Returns (stats, contour_radii) where:
+        stats          : list[(cx, cy, radius)] indexed by extracted-frame index
+        contour_radii  : np.ndarray shape (total_frames, N_CONTOUR_ANGLES) float32
     """
     if save_indices:
         mask_dir.mkdir(parents=True, exist_ok=True)
+
+    contour_arr = np.zeros((total_frames, N_CONTOUR_ANGLES), dtype=np.float32)
 
     # Temp directory holding only the current window's frames.
     # SAM2's init_state pre-allocates one tensor for ALL files in the directory
@@ -228,7 +272,7 @@ def run_sam2(
                 ):
                     local_masks[local_idx] = (logits[0, 0] > 0.0).cpu().numpy()
 
-            # Map local indices back to global; write PNGs and compute stats
+            # Map local indices back to global; write PNGs, compute stats + contour
             for local_idx in range(n):
                 global_idx = win_start + local_idx
                 mask = local_masks.get(local_idx)
@@ -240,7 +284,10 @@ def run_sam2(
                         str(mask_dir / f"{global_idx:06d}.png"),
                         (mask.astype(np.uint8) * 255),
                     )
-                all_stats.append(mask_to_stats(mask))
+                stats = mask_to_stats(mask)
+                all_stats.append(stats)
+                cx, cy, radius = stats
+                contour_arr[global_idx] = mask_to_contour(mask, cx, cy, radius)
 
             # Last mask of this window is the prompt for the next window
             if local_masks:
@@ -250,7 +297,7 @@ def run_sam2(
         if win_dir.exists():
             shutil.rmtree(win_dir)
 
-    return all_stats
+    return all_stats, contour_arr
 
 
 # ── Validation mosaic ─────────────────────────────────────────────────────────
@@ -466,10 +513,17 @@ def main() -> None:
 
     # ── 5. Propagate ─────────────────────────────────────────────────────────
     print(f"\nRunning SAM2 propagation...")
-    seg_stats = run_sam2(
+    seg_stats, contour_arr = run_sam2(
         predictor, frames_dir, point, mask_dir,
         n_extracted, args.window_size, save_indices,
     )
+
+    # ── 5b. Save contour radii ────────────────────────────────────────────────
+    contour_npy = OUTPUTS_DIR / f"{stem}_contour_radii.npy"
+    np.save(str(contour_npy), contour_arr)
+    print(f"Contour radii saved: {contour_npy}  "
+          f"shape={contour_arr.shape}  "
+          f"size={contour_npy.stat().st_size // 1024} KB")
 
     # ── 6. Save centroid CSV ──────────────────────────────────────────────────
     print(f"\nWriting centroid CSV: {seg_csv}")
