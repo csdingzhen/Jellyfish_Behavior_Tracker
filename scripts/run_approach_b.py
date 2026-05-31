@@ -528,13 +528,13 @@ def main() -> None:
         description="Approach B -- Polar margin intensity difference")
     ap.add_argument("--video",       default="data/test_clip_1min.mp4")
     ap.add_argument("--stride",      type=int,   default=1)
-    ap.add_argument("--inner-frac",  type=float, default=0.75,
+    ap.add_argument("--inner-frac",  type=float, default=0.85,
                     help="Inner edge of margin ring as fraction of bell radius (default 0.75)")
     ap.add_argument("--outer-frac",  type=float, default=1.05,
                     help="Outer edge of margin ring (>1.0 includes outside bell, default 1.05)")
     ap.add_argument("--pre-window",  type=int,   default=PRE_WINDOW)
     ap.add_argument("--min-distance",type=float, default=MIN_PULSE_DISTANCE_S)
-    ap.add_argument("--prominence",  type=float, default=0.05)
+    ap.add_argument("--prominence",  type=float, default=0.08)
     ap.add_argument("--recompute",   action="store_true",
                     help="Recompute margin_diff.npy even if it already exists")
     ap.add_argument("--no-video",    action="store_true")

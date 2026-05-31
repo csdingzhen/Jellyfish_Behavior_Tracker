@@ -3,7 +3,7 @@
 Automated video analysis pipeline for *Cassiopea* (upside-down jellyfish) recordings. Given a top-view video of the animal with a small dye mark applied to its bell, this pipeline extracts:
 
 - **Bell orientation over time** — which way the animal is facing at each moment
-- **Contraction signal over time** — when the bell pulses and how strongly
+- **Contraction timing** — when the bell pulses and how strongly
 - **Pulse initiation site** — which rhopalium (marginal neurocluster) triggered each contraction
 
 ---
@@ -21,23 +21,97 @@ Because the animal has no obvious anatomical landmark for orientation (unlike *A
 ```text
 Your video
     │
-    ├─► Track the dye mark through every frame
-    │       → gives the bell orientation at each moment
+    ├─► Track the dye mark through every frame            (CoTracker)
+    │       → bell orientation at each moment
     │
-    ├─► Outline the jellyfish bell in every frame
-    │       → gives the bell centre, size, and boundary
+    ├─► Outline the jellyfish bell in every frame         (SAM2)
+    │       → bell centre, size, and boundary
+    │       → contour radii r(θ, t): bell-edge position per angle
     │
-    ├─► [One-time] From a hi-res photo, record where each rhopalium sits
-    │       → gives fixed angular positions relative to the dye mark
+    ├─► [One-time] From a hi-res photo, click each rhopalium
+    │       → fixed body-frame angles saved to calibration file
     │
-    ├─► Measure how pixels move between consecutive frames
-    │       → contracting regions show pixels moving inward
-    │       → summing this over the bell gives a contraction signal over time
-    │
-    └─► For each contraction peak, find where the wave first appeared
-            → convert that location to an angle relative to the dye mark
-            → match to the nearest rhopalium
-            → that rhopalium initiated the pulse
+    └─► For each frame pair, measure optical change at the bell margin
+            → decomposed by angle (polar unwrap)
+            → peaks in total margin activity = contraction events
+            → first angle to show elevated activity = initiation site
+            → match to nearest rhopalium from calibration
+```
+
+---
+
+## How the initiation detection works (Approach B)
+
+This is the novel analysis step and deserves a detailed explanation.
+
+### Polar unwrapping
+
+`cv2.warpPolar` remaps the circular bell image into a rectangle where rows = angle
+(0–360°) and columns = radius. This "unrolls" the bell ring so that the margin
+becomes a flat horizontal band:
+
+```text
+Original frame           After polar unwrap
+                         0°  ──────────────────── 360°
+   ┌───────────┐         │  inner  [margin] outer  │
+   │     ○     │  ──►    │  ░░░░░░ █████████ ░░░░  │
+   └───────────┘         └─────────────────────────┘
+                                   ▲
+                             strip we extract
+```
+
+We keep only the outer annular band (default: 75–105% of bell radius).
+Setting the outer edge beyond 100% captures tissue **outside** the bell boundary —
+this is where an expansion wave appears first when a rhopalium fires.
+
+### Frame-to-frame difference per angle
+
+For each consecutive frame pair, we compute the absolute pixel intensity change
+in the margin strip, averaged radially:
+
+```text
+margin_diff[θ, t] = mean( |strip(t+1, θ) − strip(t, θ)| )
+```
+
+This 2D signal (angle × time) measures optical activity at each margin position
+at each moment. It detects tissue deformation, texture change, and boundary
+movement simultaneously — sensitive to events that occur before the macroscopic
+contraction is visible.
+
+### Body-frame rotation
+
+The signal is rotated by −φ\_dye(t) so that angle 0 always points toward the
+dye mark. This makes measurements from different frames directly comparable
+regardless of slow animal rotation.
+
+### Pulse detection
+
+Summing across all angles gives total margin activity. Peaks = contraction events.
+
+### Initiation detection
+
+For each pulse peak t\*:
+
+1. Compute per-angle resting baseline from the frames just before the pre-window
+2. Subtract baseline → excess activity above noise floor
+3. Smooth angularly (Gaussian, circular) → suppress pixel-level noise
+4. Scan pre-window frames from earliest: the first frame where any angle exceeds
+   25% of the peak activity level = initiation frame
+5. argmax of that frame → initiation angle in body frame
+6. Match to the nearest rhopalium from the calibration file
+
+The result is a **space-time plot** (angle × time heatmap) that directly shows
+the contraction wave spreading outward from the initiation rhopalium:
+
+```text
+angle
+360°│░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+    │░░░░░░░░░░░░░░▓▓▓▓▓▓▓▓▓▓▓▓░░░  ← wave spreading
+    │░░░░░░░░░░░░░▓▓▓▓▓▓▓▓▓▓▓▓▓░░░
+    │░░░░░░░░░░░░▓▓░░░░░░░░░░░░░░░░  ← initiation point
+    │░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+  0°└─────────────────────────────► time → peak
 ```
 
 ---
@@ -59,7 +133,7 @@ Your video
 ### Dye mark
 
 - A small visible mark applied to the bell surface
-- Fluorescent dye under UV illumination gives best contrast, but standard dye also works
+- Fluorescent dye under UV illumination gives best contrast, but standard dye works
 - Place the mark off-centre so it can define an orientation angle
 
 ---
@@ -78,13 +152,12 @@ cd Jellyfish
 
 ### 2. Run the setup script
 
-Creates a virtual environment, installs all packages, downloads model weights (~400 MB), and runs a GPU check:
-
 ```powershell
 .\setup.ps1
 ```
 
-After it finishes you should see:
+Creates a virtual environment, installs all packages, downloads model weights (~400 MB),
+and runs a GPU smoke test. After it finishes you should see:
 
 ```text
 All checks passed. Environment is ready.
@@ -92,7 +165,7 @@ All checks passed. Environment is ready.
 
 ### 3. Set your video folder
 
-Open [config.py](config.py) and change `VIDEO_DIR` to wherever your recordings live:
+Open [config.py](config.py) and change `VIDEO_DIR`:
 
 ```python
 VIDEO_DIR = Path(r"C:\Users\YourName\Videos\Cassiopea")
@@ -104,10 +177,8 @@ VIDEO_DIR = Path(r"C:\Users\YourName\Videos\Cassiopea")
 
 ### Prepare a test clip
 
-Working on the full recording (often 1+ hours) is slow during development. Crop a 60-second clip first using ffmpeg:
-
 ```powershell
-& "C:\path\to\ffmpeg.exe" -i "C:\Users\YourName\Videos\recording.mp4" `
+& "C:\path\to\ffmpeg.exe" -i "C:\path\to\recording.mp4" `
     -ss 00:00:00 -t 60 -c copy data\test_clip.mp4
 ```
 
@@ -115,34 +186,32 @@ Working on the full recording (often 1+ hours) is slow during development. Crop 
 
 ### Step 1 — Segment the bell (SAM2)
 
-This step outlines the jellyfish bell in every frame using an AI segmentation model. It produces a per-frame centre point and size estimate.
+Outlines the jellyfish bell in every frame. Also computes the bell contour
+profile r(θ, t) on the fly, which is needed for Approach A.
 
 ```powershell
 .\venv\Scripts\python.exe scripts\run_sam2.py --video data\test_clip.mp4
 ```
 
-A window opens showing the first frame. **Click anywhere on the bell body** (not the edge, not the tentacles), then press **ENTER**. The model tracks the bell outline through the full clip automatically.
-
-For long recordings, use `--window-size 200` to limit memory use per batch.
+A window opens. **Click anywhere on the bell body**, then press **ENTER**.
 
 **Outputs:**
 
-- `outputs\test_clip_seg.csv` — bell centre (cx, cy) and radius for each frame
-- `outputs\test_clip_sam2_validation.png` — spot-check image showing segmentation quality
+- `outputs\test_clip_seg.csv` — bell centre (cx, cy) and radius per frame
+- `outputs\test_clip_contour_radii.npy` — bell boundary profile r(θ, t)
+- `outputs\test_clip_sam2_validation.png` — spot-check image
 
 ---
 
 ### Step 2 — Track the dye mark (CoTracker)
 
-This step tracks the dye mark through every frame using a point-tracking AI model. Even faint or low-contrast marks can be followed using temporal context across many frames.
-
 ```powershell
 .\venv\Scripts\python.exe scripts\cotracker_test.py --video data\test_clip.mp4
 ```
 
-A window opens. **Click on the dye mark** in the first frame, then press **ENTER**.
+A window opens. **Click on the dye mark**, then press **ENTER**.
 
-For a faster first test run, process every 4th frame (30 fps effective):
+For a faster first run, use every 4th frame (30 fps effective):
 
 ```powershell
 .\venv\Scripts\python.exe scripts\cotracker_test.py --stride 4
@@ -150,32 +219,25 @@ For a faster first test run, process every 4th frame (30 fps effective):
 
 **Outputs:**
 
-- `outputs\test_clip_track.csv` — dye mark position (x, y) and confidence for each frame
+- `outputs\test_clip_track.csv` — dye mark position (x, y) and confidence per frame
 - `outputs\test_clip_tracked.mp4` — video with dye mark overlaid
 
 ---
 
 ### Step 3 — Validate tracking
 
-Generate a combined annotated video showing both the bell outline and dye mark on every frame. This is the key quality check before proceeding.
-
 ```powershell
 .\venv\Scripts\python.exe scripts\validate_tracking.py
 ```
 
-**What to look for:**
-
-- The red dot (bell centre) should stay on the animal throughout
-- The green dot (dye mark) should follow the mark on the bell
-- The body-axis angle (`phi`) shown in the HUD should be stable during resting
-
-**Output:** `outputs\test_clip_annotated.mp4`
+Generates `outputs\test_clip_annotated.mp4`. Check that the red dot (bell centre)
+stays on the animal and the green dot (dye mark) follows the mark throughout.
 
 ---
 
 ### Step 4 — Calibrate rhopalium positions (one-time per animal)
 
-Take a **high-resolution still photo** of the jellyfish with the dye mark visible. Run the calibration tool to record where each rhopalium sits relative to the dye mark. This only needs to be done once — rhopalium positions are fixed to the bell.
+Take a **high-resolution still photo** of the jellyfish with the dye mark visible.
 
 ```powershell
 .\venv\Scripts\python.exe scripts\calibrate_rhopalia.py "C:\path\to\photo.jpg"
@@ -186,89 +248,99 @@ Take a **high-resolution still photo** of the jellyfish with the dye mark visibl
 | Step | Action | Key |
 | --- | --- | --- |
 | 1 | Click the bell centre of mass | ENTER |
-| 2 | Click the dye mark (becomes the 0° reference) | ENTER |
+| 2 | Click the dye mark (0° reference) | ENTER |
 | 3 | Click each rhopalium one by one | BACKSPACE to undo, ENTER when done |
 
 **Outputs:**
 
-- `calibration\photo_name.json` — rhopalium body-frame angles (used by Step 6)
-- `calibration\photo_name_annotated.png` — labelled diagram for verification
+- `calibration\photo_name.json` — rhopalium body-frame angles (permanent record)
+- `calibration\photo_name_annotated.png` — labelled diagram
 
 ---
 
-### Step 5 — Compute the contraction signal (RAFT)
+### Step 5 — Pulse initiation analysis (Approach B)
 
-This step measures pixel motion between consecutive frames and quantifies how much the bell is contracting at each moment. The sum of inward motion across the bell gives a contraction signal over time.
+Detects contraction events and identifies which rhopalium initiated each pulse
+using polar margin intensity differences.
 
 ```powershell
-.\venv\Scripts\python.exe scripts\run_raft.py
+.\venv\Scripts\python.exe scripts\run_approach_b.py
 ```
 
-Processing takes roughly 2–5 minutes for a 1-minute clip at 120 fps.
+Phase 1 computes and caches `_margin_diff.npy` (~2–3 min, done once).
+All subsequent runs with different parameters reuse the cache and finish in seconds.
+
+**Tunable parameters:**
+
+| Parameter | Default | Effect |
+| --- | --- | --- |
+| `--inner-frac` | 0.75 | Inner edge of margin ring (fraction of bell radius). Decrease to include more of the bell interior. |
+| `--outer-frac` | 1.05 | Outer edge. Values > 1.0 include tissue outside the bell where the expansion wave first appears. |
+| `--pre-window` | 30 | Frames before peak to scan for initiation. Increase for slow pulses; decrease if pulses are rapid. |
+| `--min-distance` | 0.42 s | Minimum time between detected pulses. Increase to suppress double-detections. |
+| `--prominence` | 0.05 | Peak detection threshold (fraction of signal range). Increase to filter weak events. |
+| `--recompute` | off | Force recomputation of margin_diff.npy. Only needed when changing inner-frac or outer-frac. |
 
 **Outputs:**
 
-- `outputs\test_clip_contraction.csv` — contraction strength per frame
-- `outputs\test_clip_peaks.csv` — detected pulse events (frame, time, strength)
-- `outputs\test_clip_contraction_plot.png` — signal plot with peaks marked — **check this first**
-
-Tuning peak detection if the plot looks wrong:
-
-```powershell
-# Adjust minimum gap between pulses (default 0.42 s):
-.\venv\Scripts\python.exe scripts\run_raft.py --min-distance 0.5
-
-# Raise the detection threshold to reduce false peaks:
-.\venv\Scripts\python.exe scripts\run_raft.py --prominence 0.1
-```
+- `outputs\test_clip_margin_diff.npy` — cached per-angle margin activity (N_frames × 360)
+- `outputs\test_clip_initiation_b.csv` — per-pulse rhopalium assignments
+- `outputs\test_clip_initiation_b_plot.png` — activity signal + firing histogram
+- `outputs\test_clip_spacetime_pulse_b\pulse_000.png` — angle × time heatmap per pulse
+- `outputs\test_clip_initiation_b_annotated.mp4` — full video with pulse labels
 
 ---
 
-### Step 6 — Identify pulse initiators
-
-For each detected contraction peak, this step finds where the contractile wave first appeared, converts that location to a body-frame angle, and matches it to the nearest rhopalium.
-
-```powershell
-.\venv\Scripts\python.exe scripts\run_stage6.py
-```
-
-**Outputs:**
-
-- `outputs\test_clip_initiation.csv` — per-pulse rhopalium assignments
-- `outputs\test_clip_initiation_plot.png` — which rhopalium fires most + firing timeline
-- `outputs\test_clip_initiation_annotated.mp4` — full video with pulse initiation sites labelled
-
-**Reading the initiation CSV:**
+### Reading the initiation CSV
 
 | Column | Meaning |
 | --- | --- |
 | `peak_frame` | Video frame at peak contraction |
 | `timestamp_s` | Time in seconds |
-| `rhopalium_id` | Which rhopalium initiated (0–15) |
-| `phi_origin_body` | Angle of initiation site in body frame (degrees) |
-| `angular_dist_deg` | Gap to matched rhopalium — smaller = more confident |
+| `init_angle_deg` | Body-frame angle of initiation site (0° = dye mark) |
+| `rhopalium_id` | Matched rhopalium (0–15) |
+| `angular_dist_deg` | Arc distance to matched rhopalium — values below 11.25° (half of 360°/16) indicate confident assignment |
+| `signal_confident` | 1 = confident (strong signal AND angular_dist ≤ 11.25°), 0 = uncertain |
 
-A well-functioning result has `angular_dist_deg` consistently below ~11° (half the 22.5° spacing between 16 evenly distributed rhopalia).
+---
+
+## Interpreting the space-time plot
+
+Each `spacetime_pulse_b/pulse_NNN.png` shows a heatmap of margin activity
+(angle on Y axis, time on X axis). Warm colours indicate high pixel change rate.
+
+**What to look for:**
+
+- A localised bright region appearing early in the pre-window at the initiation
+  angle, then spreading to adjacent angles = clean initiation detection
+- The cyan horizontal line marks the detected initiation angle; dashed lines
+  mark rhopalium positions
+- If the bright region is diffuse from the start, the initiation happened before
+  the pre-window — try increasing `--pre-window`
 
 ---
 
 ## Known limitations
 
-### Pulse initiation detection
+### Initiation detection accuracy
 
-The initiation analysis depends on detecting where the contractile wave first appears in the optical flow field. This works best with high frame rate (≥ 60 fps recommended), good image contrast in the bell texture, and a clear bell-background boundary. In recordings with low contrast or motion blur, the `angular_dist_deg` column indicates reliability — values above 20° suggest the match is uncertain and should be reviewed using the annotated video.
+The polar margin approach works best with:
 
-### Dye mark contrast
+- Frame rate ≥ 60 fps (120 fps preferred)
+- Visible texture at the bell margin (zooxanthellae pattern helps)
+- Consistent camera position relative to the animal
 
-Very faint dye marks can be tracked reliably by CoTracker if they are visible in at least the first few frames. Adding a fluorescent dye with UV illumination dramatically improves contrast and tracking confidence.
+Some pulses will still show `signal_confident = 0`, meaning the initiation
+could not be reliably attributed to a single rhopalium. The `angular_dist_deg`
+column quantifies the confidence; use only confident assignments for statistics.
 
 ### Long recordings
 
-For recordings longer than a few minutes:
+For recordings longer than a few minutes, process in temporal segments:
 
-- SAM2 processes in batches of 200 frames to stay within memory limits
-- CoTracker processes in chunks of 200 frames
-- RAFT streams frame-by-frame so length is not a memory constraint
+- SAM2 batches internally (200-frame windows, memory-bounded)
+- `margin_diff.npy` is computed frame-by-frame (memory is not a constraint)
+- Concatenate per-segment CSVs afterward for a full-recording analysis
 
 ---
 
@@ -276,20 +348,23 @@ For recordings longer than a few minutes:
 
 ```text
 outputs\
-  <clip>_seg.csv                   bell centre and radius per frame  (SAM2)
-  <clip>_track.csv                 dye mark position per frame  (CoTracker)
-  <clip>_contraction.csv           contraction signal per frame  (RAFT)
-  <clip>_peaks.csv                 detected pulse events
-  <clip>_initiation.csv            per-pulse rhopalium assignments
-  <clip>_annotated.mp4             validation video  (dye + centroid)
-  <clip>_sam2_validation.png       SAM2 segmentation spot-check
-  <clip>_contraction_plot.png      contraction signal plot
-  <clip>_initiation_plot.png       which rhopalium fires when
-  <clip>_initiation_annotated.mp4  full video with pulse labels
+  <clip>_seg.csv                    bell centre + radius per frame  (SAM2)
+  <clip>_contour_radii.npy          bell boundary r(θ,t)  (SAM2)
+  <clip>_track.csv                  dye mark position per frame  (CoTracker)
+  <clip>_margin_diff.npy            per-angle margin activity  (Approach B cache)
+  <clip>_initiation_b.csv           per-pulse rhopalium assignments
+  <clip>_annotated.mp4              validation video  (dye + centroid)
+  <clip>_sam2_validation.png        SAM2 segmentation spot-check
+  <clip>_initiation_b_plot.png      activity signal + firing histogram
+  <clip>_initiation_b_annotated.mp4 full video with pulse labels
+  <clip>_spacetime_pulse_b\         per-pulse angle × time heatmaps
+    pulse_000.png
+    pulse_001.png
+    ...
 
 calibration\
-  <animal>.json                    rhopalium body-frame angles  (permanent record)
-  <animal>_annotated.png           labelled calibration diagram
+  <animal>.json                     rhopalium body-frame angles  (permanent)
+  <animal>_annotated.png            labelled calibration diagram
 ```
 
 ---
@@ -298,7 +373,7 @@ calibration\
 
 - **SAM2** (bell segmentation): Apache 2.0
 - **CoTracker** (dye tracking): CC-BY-NC 4.0 — research use only. For commercial use, replace with TAPIR (Apache 2.0).
-- **RAFT** (optical flow, via torchvision): BSD
+- **RAFT** (optical flow, via torchvision): BSD — included in the environment but not used in the primary pipeline
 
 ---
 
@@ -308,4 +383,3 @@ Models used:
 
 - SAM2: Ravi et al., Meta AI (2024)
 - CoTracker: Karaev et al., Meta AI + Oxford VGG (2023)
-- RAFT: Teed & Deng, Princeton (2020)
