@@ -102,16 +102,19 @@ def run_pipeline(
     dye_click:    tuple[int, int],
     calib_path:   Path,
     *,
-    stride:         int   = 4,
-    window_size:    int   = 200,
-    save_n_masks:   int   = 20,
-    chunk_size:     int   = 200,
-    inner_frac:     float = 0.75,
-    outer_frac:     float = 1.05,
-    pre_window:     int   = 30,
-    min_distance:   float = 0.42,
-    prominence:     float = 0.05,
-    delete_frames:  bool  = True,
+    stride:           int   = 4,
+    window_size:      int   = 200,
+    save_n_masks:     int   = 20,
+    inner_frac:       float = 0.75,
+    outer_frac:       float = 1.05,
+    pre_window:       int   = 30,
+    min_distance:     float = 0.42,
+    prominence:       float = 0.05,
+    delete_frames:    bool  = True,
+    # PERF branch options
+    sam2_tracks_dye:  bool      = False,   # SAM2 obj_id=2 replaces CoTracker
+    image_size:       int | None = None,   # SAM2 internal ViT resolution override
+    use_gpu_approach_b: bool    = False,   # GPU grid_sample for margin diff
     progress_callback: ProgressCallback | None = None,
     cancel_event:      threading.Event  | None = None,
 ) -> PipelineResult:
@@ -148,14 +151,19 @@ def run_pipeline(
         video_path, bell_click,
         stride=stride, window_size=window_size,
         save_n_masks=save_n_masks, delete_frames=delete_frames,
+        dye_click=dye_click if sam2_tracks_dye else None,
+        image_size=image_size,
     ))
-    scheduler.add(make_cotracker_task(
-        video_path, dye_click,
-        stride=stride, chunk_size=chunk_size,
-    ))
+    if not sam2_tracks_dye:
+        # main branch: CoTracker handles dye tracking separately
+        scheduler.add(make_cotracker_task(
+            video_path, dye_click,
+            stride=stride, chunk_size=200,
+        ))
     scheduler.add(make_phase1a_task(
         video_path,
         stride=stride, inner_frac=inner_frac, outer_frac=outer_frac,
+        use_gpu=use_gpu_approach_b,
     ))
     scheduler.add(make_phase1b_task(video_path, stride=stride))
     scheduler.add(make_analysis_task(

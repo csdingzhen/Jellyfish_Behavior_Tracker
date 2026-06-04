@@ -181,15 +181,21 @@ def main() -> None:
     ap.add_argument("--video",        default="data/test_clip_1min.mp4")
     ap.add_argument("--calib",        default=None,
                     help="Path to calibration JSON (auto-detected if omitted)")
-    ap.add_argument("--stride",       type=int,   default=4)
-    ap.add_argument("--window-size",  type=int,   default=200)
-    ap.add_argument("--chunk-size",   type=int,   default=200)
+    ap.add_argument("--stride",       type=int,   default=8,
+                    help="Frame stride (default 8 = 15fps on this branch)")
+    ap.add_argument("--window-size",  type=int,   default=400,
+                    help="SAM2 window size (default 400, larger = less overhead)")
     ap.add_argument("--inner-frac",   type=float, default=0.85)
     ap.add_argument("--outer-frac",   type=float, default=1.05)
     ap.add_argument("--pre-window",   type=int,   default=30)
     ap.add_argument("--min-distance", type=float, default=0.42)
     ap.add_argument("--prominence",   type=float, default=0.08)
     ap.add_argument("--save-n-masks", type=int,   default=20)
+    # PERF branch options
+    ap.add_argument("--image-size",   type=int,   default=512,
+                    help="SAM2 internal ViT resolution (default 512 on perf branch)")
+    ap.add_argument("--no-gpu-approach-b", action="store_true",
+                    help="Disable GPU grid_sample for Approach B (fall back to CPU)")
     args = ap.parse_args()
 
     root       = Path(__file__).parent.parent
@@ -242,15 +248,18 @@ def main() -> None:
             calib_path  = calib_path,
             stride      = args.stride,
             window_size = args.window_size,
-            chunk_size  = args.chunk_size,
             inner_frac  = args.inner_frac,
             outer_frac  = args.outer_frac,
             pre_window  = args.pre_window,
             min_distance= args.min_distance,
             prominence  = args.prominence,
             save_n_masks= args.save_n_masks,
-            progress_callback = progress_cb,
-            cancel_event      = cancel_event,
+            # PERF branch: SAM2 tracks dye internally, GPU Approach B, 512px
+            sam2_tracks_dye     = True,
+            image_size          = args.image_size,
+            use_gpu_approach_b  = not args.no_gpu_approach_b,
+            progress_callback   = progress_cb,
+            cancel_event        = cancel_event,
         )
     except KeyboardInterrupt:
         cancel_event.set()

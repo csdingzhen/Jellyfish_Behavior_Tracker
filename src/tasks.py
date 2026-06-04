@@ -68,6 +68,8 @@ def _run_sam2_task(
     window_size:   int,
     save_n_masks:  int,
     delete_frames: bool = False,
+    dye_click:     tuple[int, int] | None = None,    # PERF: track dye inside SAM2
+    image_size:    int | None = None,                # PERF: override internal ViT resolution
     progress_callback: Callable | None = None,
     cancel_event:      threading.Event | None = None,
 ) -> None:
@@ -111,24 +113,27 @@ def _run_sam2_task(
         progress_callback(0, n_extracted, "Loading SAM2...")
 
     from sam2.build_sam import build_sam2_video_predictor
+    from config import SAM2_CONFIG
     device    = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+    overrides = [f"++model.image_size={image_size}"] if image_size else []
     predictor = build_sam2_video_predictor(
-        "configs/sam2.1/sam2.1_hiera_b+.yaml",
-        str(SAM2_WEIGHTS),
-        device=device,
+        SAM2_CONFIG, str(SAM2_WEIGHTS), device=device,
+        hydra_overrides_extra=overrides if overrides else None,
     )
 
-    seg_stats, contour_arr = run_sam2(
+    seg_stats, contour_arr, dye_track_list = run_sam2(
         predictor, frames_dir, bell_click, mask_dir,
         n_extracted, window_size, save_indices,
+        dye_click=dye_click,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
     )
 
     # Write seg CSV
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    run_dir(video_path).mkdir(parents=True, exist_ok=True)
+    import csv as _csv
     with open(seg_csv, "w", newline="") as f:
-        w = __import__("csv").writer(f)
+        w = _csv.writer(f)
         w.writerow(["frame_idx", "timestamp_s", "cx", "cy", "radius_px"])
         for i, (cx, cy, r) in enumerate(seg_stats):
             raw = i * stride
@@ -137,6 +142,18 @@ def _run_sam2_task(
 
     # Write contour radii
     np.save(str(cont_npy), contour_arr)
+
+    # Write dye track CSV (same format as CoTracker) when dye_click was provided
+    if dye_click is not None and dye_track_list:
+        track_csv = _out(video_path, f"{_stem(video_path)}_track.csv")
+        with open(track_csv, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(["frame_idx", "timestamp_s", "x", "y", "visible"])
+            for i, (dx, dy) in enumerate(dye_track_list):
+                raw = i * stride
+                vis = 1 if (dx > 0 or dy > 0) else 0
+                w.writerow([raw, f"{raw / fps_raw:.4f}",
+                            f"{dx:.2f}", f"{dy:.2f}", vis])
 
     # Delete extracted JPEG frames if requested (saves 5+ GB for long videos)
     if delete_frames and frames_dir.exists():
@@ -152,19 +169,25 @@ def _run_sam2_task(
 def make_sam2_task(
     video_path:   Path,
     bell_click:   tuple[int, int],
-    stride:         int  = 4,
-    window_size:    int  = 200,
-    save_n_masks:   int  = 20,
-    delete_frames:  bool = True,   # delete JPEG frames after SAM2 to reclaim disk
+    stride:         int   = 4,
+    window_size:    int   = 200,
+    save_n_masks:   int   = 20,
+    delete_frames:  bool  = True,
+    dye_click:      tuple[int, int] | None = None,   # PERF: track dye inside SAM2
+    image_size:     int | None = None,               # PERF: override ViT resolution
 ) -> Task:
-    stem = _stem(video_path)
+    stem    = _stem(video_path)
+    outputs = [_out(video_path, f"{stem}_seg.csv"),
+               _out(video_path, f"{stem}_contour_radii.npy")]
+    if dye_click is not None:
+        outputs.append(_out(video_path, f"{stem}_track.csv"))
     return Task(
         name        = "SAM2 segmentation",
         fn          = _run_sam2_task,
         deps        = [],
         resource    = "gpu",
         inputs      = [video_path],
-        outputs     = [_out(video_path, f"{stem}_seg.csv"), _out(video_path, f"{stem}_contour_radii.npy")],
+        outputs     = outputs,
         weight      = 4.0,
         task_kwargs = dict(
             video_path     = video_path,
@@ -173,6 +196,8 @@ def make_sam2_task(
             window_size    = window_size,
             save_n_masks   = save_n_masks,
             delete_frames  = delete_frames,
+            dye_click      = dye_click,
+            image_size     = image_size,
         ),
     )
 
@@ -258,25 +283,31 @@ def _run_phase1a_task(
     stride:     int,
     inner_frac: float,
     outer_frac: float,
+    use_gpu:    bool = False,    # PERF: use GPU grid_sample instead of CPU warpPolar
     progress_callback: Callable | None = None,
     cancel_event:      threading.Event | None = None,
 ) -> None:
-    import csv as _csv
-    from scripts.run_approach_b import load_seg, compute_margin_diff_lab
+    from scripts.run_approach_b import load_seg
 
     stem    = _stem(video_path)
     seg_csv = _out(video_path, f"{stem}_seg.csv")
     lab_npy = _out(video_path, f"{stem}_margin_diff_lab.npy")
-
     seg = load_seg(seg_csv)
 
-    lab = compute_margin_diff_lab(
-        video_path, seg, stride, inner_frac, outer_frac,
-        progress_callback=progress_callback,
-        cancel_event=cancel_event,
-    )
+    if use_gpu:
+        from scripts.run_approach_b import compute_margin_diff_lab_gpu
+        lab = compute_margin_diff_lab_gpu(
+            video_path, seg, stride, inner_frac, outer_frac,
+            progress_callback=progress_callback, cancel_event=cancel_event,
+        )
+    else:
+        from scripts.run_approach_b import compute_margin_diff_lab
+        lab = compute_margin_diff_lab(
+            video_path, seg, stride, inner_frac, outer_frac,
+            progress_callback=progress_callback, cancel_event=cancel_event,
+        )
 
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    run_dir(video_path).mkdir(parents=True, exist_ok=True)
     np.save(str(lab_npy), lab)
 
     if progress_callback:
@@ -288,6 +319,7 @@ def make_phase1a_task(
     stride:     int   = 4,
     inner_frac: float = 0.75,
     outer_frac: float = 1.05,
+    use_gpu:    bool  = False,   # PERF: GPU-accelerated polar transform
 ) -> Task:
     stem = _stem(video_path)
     seg_csv = _out(video_path, f"{stem}_seg.csv")
@@ -295,7 +327,7 @@ def make_phase1a_task(
         name        = "Margin diff (lab frame)",
         fn          = _run_phase1a_task,
         deps        = ["SAM2 segmentation"],   # needs seg.csv
-        resource    = "cpu",
+        resource    = "gpu" if use_gpu else "cpu",
         inputs      = [video_path, seg_csv],
         outputs     = [_out(video_path, f"{stem}_margin_diff_lab.npy")],
         weight      = 1.5,
@@ -304,6 +336,7 @@ def make_phase1a_task(
             stride     = stride,
             inner_frac = inner_frac,
             outer_frac = outer_frac,
+            use_gpu    = use_gpu,
         ),
     )
 
