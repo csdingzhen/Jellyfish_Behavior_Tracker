@@ -153,52 +153,114 @@ def margin_strip(frame_gray: np.ndarray, cx: float, cy: float,
     return strip.mean(axis=1)              # (N_ANGLES,) — mean intensity per angle
 
 
+def compute_margin_diff_lab(
+    video_path:        Path,
+    seg:               dict,
+    stride:            int,
+    inner_frac:        float,
+    outer_frac:        float,
+    progress_callback=None,   # (current, total, message) — for scheduler/UI
+    cancel_event=None,        # threading.Event
+) -> np.ndarray:
+    """
+    Phase 1a — compute per-angle margin intensity difference in LAB FRAME.
+
+    Does NOT apply body-frame rotation (no dye track needed).
+    Saves to *_margin_diff_lab.npy so Phase 1b can run independently
+    after CoTracker finishes, enabling SAM2 + CoTracker parallelism.
+
+    Streams directly from video; peak RAM = two grayscale frames (~640 KB).
+    Returns float32 array (N_pairs, N_ANGLES).
+    """
+    cap   = cv2.VideoCapture(str(video_path))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    n_out = (total + stride - 1) // stride
+
+    result = np.zeros((n_out - 1, N_ANGLES), dtype=np.float32)
+
+    ret, first = cap.read()
+    if not ret:
+        sys.exit("Cannot read first frame from video.")
+    prev_gray = cv2.cvtColor(first, cv2.COLOR_BGR2GRAY)
+
+    out_idx = 0
+    raw_idx = 0
+
+    with tqdm(total=n_out - 1, desc="Margin diff (lab)",
+              unit="fr", disable=progress_callback is not None) as pbar:
+        while out_idx < n_out - 1:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+
+            raw_idx += 1
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if raw_idx % stride != 0:
+                continue
+
+            curr_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            cx, cy, radius = nearest(seg, raw_idx)
+
+            if radius >= 5:
+                strip_prev = margin_strip(prev_gray, cx, cy, radius, inner_frac, outer_frac)
+                strip_curr = margin_strip(curr_gray, cx, cy, radius, inner_frac, outer_frac)
+                result[out_idx] = np.abs(strip_curr - strip_prev)
+
+            prev_gray = curr_gray
+            out_idx  += 1
+            pbar.update(1)
+            if progress_callback is not None:
+                progress_callback(out_idx, n_out - 1, f"frame {raw_idx}")
+
+    cap.release()
+    return result[:out_idx]
+
+
+def apply_body_frame_rotation(
+    lab_diff:     np.ndarray,          # (N_pairs, N_ANGLES) lab-frame from Phase 1a
+    dye:          dict,                # {frame_idx: (x, y)} from CoTracker
+    seg:          dict,                # {frame_idx: (cx, cy, r)} from SAM2
+    stride:       int,
+    frame_indices: np.ndarray | None = None,  # raw frame index per row
+) -> np.ndarray:
+    """
+    Phase 1b — rotate each row of lab_diff to body frame using φ_dye(t).
+
+    Fast numpy-only operation (~seconds). Requires both SAM2 seg and
+    CoTracker dye outputs to be available, but does not touch the GPU.
+    Returns float32 array (N_pairs, N_ANGLES) in body frame.
+    """
+    n = len(lab_diff)
+    result = lab_diff.copy()
+    for i in range(n):
+        raw = int(frame_indices[i]) if frame_indices is not None else i * stride
+        phi = phi_dye_deg(raw, seg, dye)
+        if phi is not None:
+            result[i] = to_body_frame(lab_diff[i], phi)
+    return result
+
+
 def compute_margin_diff(
-    frames_dir: Path,
+    video_path: Path,
     seg:        dict,
     dye:        dict,
     stride:     int,
     inner_frac: float,
     outer_frac: float,
+    progress_callback=None,
+    cancel_event=None,
 ) -> np.ndarray:
     """
-    Phase 1: compute per-angle margin intensity difference for all frame pairs.
-
-    Returns margin_diff: (N_pairs, N_ANGLES) float32, already in BODY FRAME.
-    N_pairs = n_extracted_frames - 1.
+    Convenience wrapper: Phase 1a + 1b in one call (legacy / standalone use).
+    Returns body-frame margin_diff directly.
     """
-    all_jpgs = sorted(frames_dir.glob("*.jpg"))
-    n = len(all_jpgs)
-    if n < 2:
-        sys.exit(f"Need at least 2 frames in {frames_dir}")
-
-    result = np.zeros((n - 1, N_ANGLES), dtype=np.float32)
-
-    # Pre-load first frame
-    prev_gray = cv2.imread(str(all_jpgs[0]), cv2.IMREAD_GRAYSCALE)
-
-    for i in tqdm(range(1, n), desc="Margin diff", unit="fr"):
-        curr_gray = cv2.imread(str(all_jpgs[i]), cv2.IMREAD_GRAYSCALE)
-        raw_idx   = i * stride
-
-        cx, cy, radius = nearest(seg, raw_idx)
-        if radius < 5:
-            prev_gray = curr_gray
-            continue
-
-        strip_prev = margin_strip(prev_gray, cx, cy, radius, inner_frac, outer_frac)
-        strip_curr = margin_strip(curr_gray, cx, cy, radius, inner_frac, outer_frac)
-        diff = np.abs(strip_curr - strip_prev)   # (N_ANGLES,)
-
-        # Convert to body frame
-        phi = phi_dye_deg(raw_idx, seg, dye)
-        if phi is not None:
-            diff = to_body_frame(diff, phi)
-
-        result[i - 1] = diff
-        prev_gray = curr_gray
-
-    return result
+    lab = compute_margin_diff_lab(
+        video_path, seg, stride, inner_frac, outer_frac,
+        progress_callback=progress_callback, cancel_event=cancel_event,
+    )
+    frame_indices = np.arange(len(lab)) * stride
+    return apply_body_frame_rotation(lab, dye, seg, stride, frame_indices)
 
 
 # ── Phase 2: pulse detection and initiation ───────────────────────────────────
@@ -251,15 +313,13 @@ def find_initiation_angle(
     peak_excess = smooth.max()
     confident   = peak_excess > baseline.mean() * 0.5  # 50% above baseline mean
 
-    threshold = peak_excess * 0.25
-    init_frame_offset = len(smooth) - 1   # default: last frame (peak)
-    for t, row in enumerate(smooth):
-        if row.max() > threshold:
-            init_frame_offset = t
-            break
-
-    init_angle = int(smooth[init_frame_offset].argmax())
-    sig_val    = float(smooth[init_frame_offset, init_angle])
+    threshold  = peak_excess * 0.25
+    init_t     = next(
+        (t for t, row in enumerate(smooth) if row.max() > threshold),
+        len(smooth) - 1,
+    )
+    init_angle = int(smooth[init_t].argmax())
+    sig_val    = float(smooth[init_t, init_angle])
     return init_angle, sig_val, confident
 
 
@@ -547,13 +607,11 @@ def main() -> None:
         video_path = root / video_path
     stem = video_path.stem
 
-    seg_csv  = OUTPUTS_DIR / f"{stem}_seg.csv"
-    dye_csv  = OUTPUTS_DIR / f"{stem}_track.csv"
-    frames_dir = OUTPUTS_DIR / f"{stem}_frames"
+    seg_csv = OUTPUTS_DIR / f"{stem}_seg.csv"
+    dye_csv = OUTPUTS_DIR / f"{stem}_track.csv"
 
-    for p, name in [(seg_csv, "seg.csv"), (frames_dir, "frames dir")]:
-        if not p.exists():
-            sys.exit(f"Not found: {p}  ({name} — run run_sam2.py first)")
+    if not seg_csv.exists():
+        sys.exit(f"Not found: {seg_csv}  (run run_sam2.py first)")
 
     seg       = load_seg(seg_csv)
     dye_track = load_dye(dye_csv) if dye_csv.exists() else {}
@@ -563,27 +621,27 @@ def main() -> None:
 
     cap     = cv2.VideoCapture(str(video_path))
     fps_raw = cap.get(cv2.CAP_PROP_FPS)
+    total_raw = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
-    fps_eff = fps_raw / args.stride
+    fps_eff       = fps_raw / args.stride
+    n_sampled     = (total_raw + args.stride - 1) // args.stride
+    frame_indices = np.arange(n_sampled) * args.stride
 
-    all_jpgs     = sorted(frames_dir.glob("*.jpg"))
-    n_extracted  = len(all_jpgs)
-    frame_indices = np.arange(n_extracted) * args.stride
-
-    print(f"Video      : {video_path.name}  ({fps_raw:.0f} fps)")
-    print(f"Frames     : {n_extracted} extracted")
+    print(f"Video      : {video_path.name}  ({fps_raw:.0f} fps, {total_raw} frames)")
+    print(f"Sampled    : {n_sampled} frames  (stride={args.stride})")
     print(f"Margin ring: {args.inner_frac:.2f} – {args.outer_frac:.2f} × radius")
     print(f"Calib      : {calib['n_rhopalia']} rhopalia")
+    print(f"Disk impact: margin_diff.npy only (~{n_sampled * N_ANGLES * 4 // 1024 // 1024} MB)")
 
-    # ── Phase 1: compute margin_diff ─────────────────────────────────────────
+    # ── Phase 1: compute margin_diff (streams from video, no JPEG extraction) ─
     diff_npy = OUTPUTS_DIR / f"{stem}_margin_diff.npy"
     if diff_npy.exists() and not args.recompute:
         print(f"\nLoading cached margin_diff ({diff_npy.stat().st_size // 1024} KB)...")
         margin_diff = np.load(str(diff_npy))
     else:
-        print("\nPhase 1: computing margin differences...")
+        print("\nPhase 1: streaming frames from video (no JPEG extraction needed)...")
         margin_diff = compute_margin_diff(
-            frames_dir, seg, dye_track, args.stride,
+            video_path, seg, dye_track, args.stride,
             args.inner_frac, args.outer_frac,
         )
         np.save(str(diff_npy), margin_diff)
@@ -599,7 +657,7 @@ def main() -> None:
     # ── Phase 3: initiation ───────────────────────────────────────────────────
     results = []
     for pid, peak_idx in enumerate(tqdm(peaks, desc="Initiation", unit="pulse")):
-        peak_frame = int(frame_indices[min(peak_idx, n_extracted - 1)])
+        peak_frame = int(frame_indices[min(peak_idx, n_sampled - 1)])
         ts         = peak_frame / fps_raw
 
         pre_w = args.pre_window

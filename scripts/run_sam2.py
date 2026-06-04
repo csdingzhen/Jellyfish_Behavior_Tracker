@@ -40,8 +40,21 @@ from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import SAM2_WEIGHTS, OUTPUTS_DIR, FPS
+from pathlib import Path as _Path
 
 SAM2_CFG      = "configs/sam2.1/sam2.1_hiera_b+.yaml"
+
+# Available model variants — (config, weights_filename, display_name)
+SAM2_MODELS = {
+    "tiny":  ("configs/sam2.1/sam2.1_hiera_t.yaml",
+               "sam2.1_hiera_tiny.pt",      "SAM2.1 hiera-tiny  (~38 MB)"),
+    "small": ("configs/sam2.1/sam2.1_hiera_s.yaml",
+               "sam2.1_hiera_small.pt",     "SAM2.1 hiera-small (~185 MB)"),
+    "base":  ("configs/sam2.1/sam2.1_hiera_b+.yaml",
+               "sam2.1_hiera_base_plus.pt", "SAM2.1 hiera-base+ (~308 MB)"),
+    "large": ("configs/sam2.1/sam2.1_hiera_l.yaml",
+               "sam2.1_hiera_large.pt",     "SAM2.1 hiera-large (~900 MB)"),
+}
 WINDOW_SIZE   = 200    # frames per SAM2 window — bounds feature-cache RAM (~2.4 GB at 1024px)
 DISPLAY_SCALE = 2      # click-UI zoom factor
 N_VALID       = 8      # frames sampled in validation mosaic
@@ -190,6 +203,8 @@ def run_sam2(
     total_frames: int,
     window_size: int,
     save_indices: set[int],
+    progress_callback=None,   # (current, total, message) — for scheduler/UI
+    cancel_event=None,        # threading.Event — checked between windows
 ) -> tuple[list[tuple[float, float, float]], np.ndarray]:
     """
     Propagate SAM2 through all frames using non-overlapping windows.
@@ -223,11 +238,17 @@ def run_sam2(
 
     try:
         for win_idx in range(n_windows):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+
             win_start = win_idx * window_size
             win_end   = min(win_start + window_size, total_frames)
             n         = win_end - win_start
-            print(f"\n  Window {win_idx + 1}/{n_windows}  "
-                  f"[frames {win_start}-{win_end - 1}]  ({n} frames)")
+
+            msg = f"Window {win_idx + 1}/{n_windows} (frames {win_start}-{win_end - 1})"
+            print(f"\n  {msg}")
+            if progress_callback is not None:
+                progress_callback(win_start, total_frames, msg)
 
             # Populate win_dir with this window's frames using hardlinks.
             # Falls back to copying if hardlinks are unavailable (cross-device).
@@ -448,6 +469,9 @@ def main() -> None:
     ap.add_argument("--save-all-masks", action="store_true",
                     help="Save a PNG mask for every frame (needed later for RAFT). "
                          "Produces ~7200 files for a 1-min 120fps clip.")
+    ap.add_argument("--sam2-model", default="base",
+                    choices=list(SAM2_MODELS.keys()),
+                    help="SAM2 model size: tiny (~38MB, ~4x faster), small, base (default), large")
     args = ap.parse_args()
 
     root       = Path(__file__).parent.parent
@@ -494,10 +518,18 @@ def main() -> None:
     print(f"Prompt point: x={point[0]}, y={point[1]}")
 
     # ── 3. Load SAM2 ──────────────────────────────────────────────────────────
+    model_cfg, model_file, model_name = SAM2_MODELS[args.sam2_model]
+    model_weights = SAM2_WEIGHTS.parent / model_file
+    if not model_weights.exists():
+        sys.exit(f"Weights not found: {model_weights}\n"
+                 f"Download with:\n"
+                 f"  Invoke-WebRequest https://dl.fbaipublicfiles.com/segment_anything_2"
+                 f"/092824/{model_file} -OutFile {model_weights}")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Loading SAM2 on {device}...")
+    print(f"Loading SAM2 [{model_name}] on {device}...")
     from sam2.build_sam import build_sam2_video_predictor
-    predictor = build_sam2_video_predictor(SAM2_CFG, str(SAM2_WEIGHTS), device=device)
+    predictor = build_sam2_video_predictor(model_cfg, str(model_weights), device=device)
 
     # ── 4. Determine which frames to save as PNGs ────────────────────────────
     if args.save_all_masks:

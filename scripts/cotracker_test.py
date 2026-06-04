@@ -136,6 +136,8 @@ def track_chunked(
     total_raw_frames: int,
     stride: int,
     chunk_size: int,
+    progress_callback=None,   # (current, total, message) — for scheduler/UI
+    cancel_event=None,        # threading.Event — checked between chunks
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Track `query_xy` through the whole video using non-overlapping chunks.
@@ -155,8 +157,12 @@ def track_chunked(
     write_ptr  = 0
     raw_ptr    = 0
 
-    with tqdm(total=n_sampled, desc="Tracking", unit="frames") as pbar:
+    with tqdm(total=n_sampled, desc="Tracking", unit="frames",
+              disable=progress_callback is not None) as pbar:
         while raw_ptr < total_raw_frames:
+            if cancel_event is not None and cancel_event.is_set():
+                break
+
             frames = read_chunk(cap, raw_ptr, chunk_size, stride)
             n = len(frames)
             if n == 0:
@@ -181,6 +187,8 @@ def track_chunked(
             write_ptr += n
             raw_ptr   += n * stride
             pbar.update(n)
+            if progress_callback is not None:
+                progress_callback(write_ptr, n_sampled, f"chunk {raw_ptr // (chunk_size * stride)}")
 
     return all_tracks[:write_ptr], all_visible[:write_ptr]
 
