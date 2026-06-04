@@ -19,6 +19,7 @@ The script prints a live progress table while the pipeline runs.
 import argparse
 import sys
 import threading
+import time
 from pathlib import Path
 
 import cv2
@@ -43,14 +44,28 @@ def _clear_lines(n: int) -> None:
         print(f"\033[{n}A\033[J", end="", flush=True)
 
 
-def make_cli_progress(task_names: list[str]):
-    """
-    Returns a ProgressCallback that prints a live updating table.
+def _fmt_time(s: float) -> str:
+    """Format elapsed seconds as a compact string: 45s / 2m34s / 1h02m."""
+    if s < 1:
+        return ""
+    if s < 60:
+        return f"{s:.0f}s"
+    m = int(s // 60)
+    sec = int(s % 60)
+    if m < 60:
+        return f"{m}m{sec:02d}s"
+    return f"{m//60}h{m%60:02d}m"
 
-    Each task gets one row; the last row shows overall pipeline progress.
+
+def make_cli_progress(task_names: list[str], pipeline_start: float):
+    """
+    Returns a ProgressCallback that prints a live updating table with timers.
+
+    Each task row shows: icon | name | progress bar | pct | message | elapsed
+    The last row shows overall progress + total pipeline elapsed time.
     Thread-safe — multiple tasks may call this simultaneously.
     """
-    _lock    = threading.Lock()
+    _lock   = threading.Lock()
     _state: dict[str, ProgressEvent] = {}
 
     STATUS_ICON = {
@@ -69,20 +84,27 @@ def make_cli_progress(task_names: list[str]):
         for name in task_names:
             ev = _state.get(name)
             if ev is None:
-                lines.append(f"  ○  {name}")
+                lines.append(f"  [ ]  {name}")
                 continue
-            icon = STATUS_ICON.get(ev.status, "?")
-            pct  = ev.fraction * 100
-            filled = round(ev.fraction * _BAR_WIDTH)
-            bar  = "█" * filled + "░" * (_BAR_WIDTH - filled)
-            msg  = (ev.message or "")[:40]
-            lines.append(f"  {icon}  {name:<35s} [{bar}] {pct:5.1f}%  {msg}")
+            icon    = STATUS_ICON.get(ev.status, "?")
+            pct     = ev.fraction * 100
+            filled  = round(ev.fraction * _BAR_WIDTH)
+            bar     = "#" * filled + "." * (_BAR_WIDTH - filled)
+            msg     = (ev.message or "")[:32]
+            t_str   = _fmt_time(ev.elapsed_s)
+            time_col = f"[{t_str:>6}]" if t_str else "        "
+            lines.append(
+                f"  {icon}  {name:<33s} [{bar}] {pct:5.1f}%  {time_col}  {msg}"
+            )
 
-        # Overall progress bar
-        overall = max((e.overall_fraction for e in _state.values()), default=0.0)
-        filled  = round(overall * _BAR_WIDTH)
-        bar     = "█" * filled + "░" * (_BAR_WIDTH - filled)
-        lines.append(f"\n  Overall [{bar}] {overall*100:5.1f}%")
+        # Overall row with pipeline wall clock
+        overall      = max((e.overall_fraction for e in _state.values()), default=0.0)
+        filled       = round(overall * _BAR_WIDTH)
+        bar          = "#" * filled + "." * (_BAR_WIDTH - filled)
+        wall_elapsed = _fmt_time(time.time() - pipeline_start)
+        lines.append(
+            f"\n  Overall [{bar}] {overall*100:5.1f}%   wall: {wall_elapsed}"
+        )
 
         _clear_lines(_last_lines)
         output = "\n".join(lines)
@@ -227,7 +249,10 @@ def main() -> None:
         sys.exit(0)
     bell_click, dye_click = clicks
 
-    # Set up progress display
+    # PERF branch: CoTracker retained for accuracy — SAM2 dye tracking was tested
+    # and found unreliable for faint dye marks. Other perf optimisations still apply.
+    _sam2_tracks_dye = False
+
     task_names = [
         "SAM2 segmentation",
         "CoTracker tracking",
@@ -235,8 +260,9 @@ def main() -> None:
         "Body-frame rotation",
         "Pulse initiation analysis",
     ]
-    cancel_event = threading.Event()
-    progress_cb  = make_cli_progress(task_names)
+    cancel_event   = threading.Event()
+    pipeline_start = time.time()
+    progress_cb    = make_cli_progress(task_names, pipeline_start)
 
     print("\nRunning pipeline...\n")
 
@@ -255,7 +281,7 @@ def main() -> None:
             prominence  = args.prominence,
             save_n_masks= args.save_n_masks,
             # PERF branch: SAM2 tracks dye internally, GPU Approach B, 512px
-            sam2_tracks_dye     = True,
+            sam2_tracks_dye     = _sam2_tracks_dye,
             image_size          = args.image_size,
             use_gpu_approach_b  = not args.no_gpu_approach_b,
             progress_callback   = progress_cb,
@@ -266,8 +292,15 @@ def main() -> None:
         print("\nCancelled by user.")
         sys.exit(1)
 
+    wall = time.time() - pipeline_start
     print(f"\n{'='*60}")
     print(result.summary())
+    print(f"\nTask timings:")
+    for name, status in result.task_status.items():
+        t = result.task_elapsed.get(name, 0.0)
+        t_str = _fmt_time(t) if t > 0 else "-"
+        print(f"  {name:<35s} {status:<10s} {t_str:>8}")
+    print(f"\n  Total wall-clock: {_fmt_time(wall)}")
     print(f"{'='*60}")
 
     if result.success:

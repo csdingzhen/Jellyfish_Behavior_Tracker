@@ -77,6 +77,7 @@ class PipelineResult:
     elapsed_s:      float             = 0.0
     success:        bool              = False
     task_status:    dict[str, str]    = field(default_factory=dict)
+    task_elapsed:   dict[str, float]  = field(default_factory=dict)
     errors:         dict[str, str]    = field(default_factory=dict)
     cancelled:      bool              = False
 
@@ -165,7 +166,8 @@ def run_pipeline(
         stride=stride, inner_frac=inner_frac, outer_frac=outer_frac,
         use_gpu=use_gpu_approach_b,
     ))
-    scheduler.add(make_phase1b_task(video_path, stride=stride))
+    scheduler.add(make_phase1b_task(video_path, stride=stride,
+                                    sam2_tracks_dye=sam2_tracks_dye))
     scheduler.add(make_analysis_task(
         video_path, calib_path,
         stride=stride, pre_window=pre_window,
@@ -193,6 +195,7 @@ def run_pipeline(
         elapsed_s       = elapsed,
         success         = success,
         task_status     = {n: s.name for n, s in snap.status.items()},
+        task_elapsed    = snap.elapsed,
         errors          = snap.errors,
         cancelled       = snap.is_cancelled,
     )

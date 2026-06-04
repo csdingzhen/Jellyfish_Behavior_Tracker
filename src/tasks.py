@@ -376,12 +376,20 @@ def _run_phase1b_task(
         progress_callback(1, 1, "Body-frame rotation complete")
 
 
-def make_phase1b_task(video_path: Path, stride: int = 4) -> Task:
+def make_phase1b_task(
+    video_path:       Path,
+    stride:           int  = 4,
+    sam2_tracks_dye:  bool = False,   # PERF: track.csv comes from SAM2, not CoTracker
+) -> Task:
     stem = _stem(video_path)
     return Task(
         name        = "Body-frame rotation",
         fn          = _run_phase1b_task,
-        deps        = ["Margin diff (lab frame)", "CoTracker tracking"],
+        # When SAM2 tracks the dye internally, track.csv is produced by SAM2 —
+        # depend on SAM2 instead of the (absent) CoTracker task.
+        deps        = (["Margin diff (lab frame)", "SAM2 segmentation"]
+                       if sam2_tracks_dye else
+                       ["Margin diff (lab frame)", "CoTracker tracking"]),
         resource    = "cpu",
         inputs      = [
             _out(video_path, f"{stem}_margin_diff_lab.npy"),
