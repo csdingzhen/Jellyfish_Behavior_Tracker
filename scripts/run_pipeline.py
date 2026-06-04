@@ -184,11 +184,11 @@ def main() -> None:
     ap.add_argument("--stride",       type=int,   default=4)
     ap.add_argument("--window-size",  type=int,   default=200)
     ap.add_argument("--chunk-size",   type=int,   default=200)
-    ap.add_argument("--inner-frac",   type=float, default=0.75)
+    ap.add_argument("--inner-frac",   type=float, default=0.85)
     ap.add_argument("--outer-frac",   type=float, default=1.05)
     ap.add_argument("--pre-window",   type=int,   default=30)
     ap.add_argument("--min-distance", type=float, default=0.42)
-    ap.add_argument("--prominence",   type=float, default=0.05)
+    ap.add_argument("--prominence",   type=float, default=0.08)
     ap.add_argument("--save-n-masks", type=int,   default=20)
     args = ap.parse_args()
 

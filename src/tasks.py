@@ -400,7 +400,7 @@ def _run_analysis_task(
     calib         = json.loads(calib_path.read_text())
     margin_diff   = np.load(str(body_npy))
     n_frames      = len(margin_diff) + 1
-    frame_indices = np.arange(n_frames - 1) * stride
+    frame_indices = np.arange(n_frames) * stride   # length n_frames, matching standalone convention
 
     total_activity = margin_diff.sum(axis=1)
     peaks, props   = detect_pulses(total_activity, fps_eff, min_distance, prominence)

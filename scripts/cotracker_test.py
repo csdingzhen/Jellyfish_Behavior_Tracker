@@ -171,7 +171,7 @@ def track_chunked(
             vid = frames_to_tensor(frames, device)                # (1,T,3,H,W)
             q   = torch.tensor([[[0.0, qx, qy]]], device=device)  # (1,1,3)
 
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
                 pred_tracks, pred_vis = model(vid, queries=q)
             # pred_tracks: (1, T, 1, 2)   pred_vis: (1, T, 1)
 
@@ -316,6 +316,8 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading CoTracker weights from {COTRACKER_WEIGHTS} on {device}...")
     model = CoTrackerPredictor(checkpoint=str(COTRACKER_WEIGHTS)).to(device).eval()
+    if device.type == "cuda":
+        model = torch.compile(model, mode="reduce-overhead")
 
     # Track
     tracks, visible = track_chunked(

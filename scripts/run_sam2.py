@@ -530,6 +530,10 @@ def main() -> None:
     print(f"Loading SAM2 [{model_name}] on {device}...")
     from sam2.build_sam import build_sam2_video_predictor
     predictor = build_sam2_video_predictor(model_cfg, str(model_weights), device=device)
+    if device.type == "cuda":
+        predictor.image_encoder = torch.compile(
+            predictor.image_encoder, mode="reduce-overhead"
+        )
 
     # ── 4. Determine which frames to save as PNGs ────────────────────────────
     if args.save_all_masks:
