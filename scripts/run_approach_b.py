@@ -26,16 +26,17 @@ Two-phase execution
 
 Usage
 -----
-  venv\Scripts\python scripts\run_approach_b.py
-  venv\Scripts\python scripts\run_approach_b.py --inner-frac 0.80
-  venv\Scripts\python scripts\run_approach_b.py --no-video
-  venv\Scripts\python scripts\run_approach_b.py --recompute
+  venv/Scripts/python scripts/run_approach_b.py
+  venv/Scripts/python scripts/run_approach_b.py --inner-frac 0.80
+  venv/Scripts/python scripts/run_approach_b.py --no-video
+  venv/Scripts/python scripts/run_approach_b.py --recompute
 """
 
 import argparse
 import csv
 import json
 import math
+import subprocess
 import sys
 from pathlib import Path
 
@@ -213,22 +214,21 @@ def compute_margin_diff_lab_gpu(
     max_r = r_med * outer_frac
     r_inner_idx = round(inner_frac / outer_frac * N_RADII)
 
-    # Polar sampling coordinates on GPU
+    # Angle basis vectors (reused across all per-frame grids)
     angles = torch.linspace(0, 2 * math.pi * (1 - 1 / N_ANGLES),
                             N_ANGLES, device=device)
-    radii  = torch.linspace(0, max_r, N_RADII, device=device)
     cos_a  = torch.cos(angles).unsqueeze(1)   # (N_ANGLES, 1)
     sin_a  = torch.sin(angles).unsqueeze(1)
-    r_2d   = radii.unsqueeze(0)               # (1, N_RADII)
 
-    def _build_grid(cx: float, cy: float) -> torch.Tensor:
-        x = cx + cos_a * r_2d                         # (N_ANGLES, N_RADII)
-        y = cy + sin_a * r_2d
+    def _build_grid(cx: float, cy: float, max_radius: float) -> torch.Tensor:
+        r_pts = torch.linspace(0, max_radius, N_RADII, device=device)
+        x = cx + cos_a * r_pts.unsqueeze(0)           # (N_ANGLES, N_RADII)
+        y = cy + sin_a * r_pts.unsqueeze(0)
         xn = (x / (w - 1)) * 2 - 1
         yn = (y / (h - 1)) * 2 - 1
         return torch.stack([xn, yn], dim=-1).unsqueeze(0)  # (1, N_ANGLES, N_RADII, 2)
 
-    polar_grid = _build_grid(cx_med, cy_med)
+    polar_grid = _build_grid(cx_med, cy_med, max_r)
 
     def _strip(gray_tensor: torch.Tensor, grid: torch.Tensor) -> torch.Tensor:
         # gray_tensor: (B, 1, H, W) float32  grid: (1, N_A, N_R, 2)
@@ -246,10 +246,11 @@ def compute_margin_diff_lab_gpu(
     if not ret:
         cap.release()
         return result[:0]
+    # Store raw gray frame (not pre-extracted strip) so each pair uses the
+    # CURRENT frame's centroid/radius for both strips — matching CPU behaviour.
     prev_gray = torch.from_numpy(
-        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
     ).to(device).unsqueeze(0).unsqueeze(0)             # (1,1,H,W)
-    prev_strip = _strip(prev_gray, polar_grid)         # (1, N_ANGLES)
 
     with tqdm(total=n_out - 1, desc="Margin diff (GPU)",
               unit="fr", disable=progress_callback is not None) as pbar:
@@ -264,25 +265,24 @@ def compute_margin_diff_lab_gpu(
                 continue
 
             curr_gray = torch.from_numpy(
-                cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
+                cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
             ).to(device).unsqueeze(0).unsqueeze(0)
 
-            # Rebuild grid if centroid has drifted significantly
+            # Build grid from CURRENT frame's centroid/radius and apply to BOTH
+            # prev and curr — same as CPU's margin_strip(prev_gray, cx_curr, ...)
             seg_entry = nearest(seg, raw_idx) if seg else None
             if seg_entry and seg_entry[2] > 0:
-                cx_f, cy_f = seg_entry[0], seg_entry[1]
-                if abs(cx_f - cx_med) > 5 or abs(cy_f - cy_med) > 5:
-                    grid = _build_grid(cx_f, cy_f)
-                else:
-                    grid = polar_grid
+                cx_f, cy_f, r_f = seg_entry
+                grid = _build_grid(cx_f, cy_f, r_f * outer_frac)
             else:
                 grid = polar_grid
 
+            prev_strip = _strip(prev_gray, grid)
             curr_strip = _strip(curr_gray, grid)
             diff = torch.abs(curr_strip - prev_strip)
             result[out_idx] = diff[0].cpu().numpy()
 
-            prev_strip = curr_strip
+            prev_gray = curr_gray
             out_idx   += 1
             pbar.update(1)
             if progress_callback:
@@ -548,6 +548,55 @@ def spacetime_plot(
 
 # ── Annotated video ───────────────────────────────────────────────────────────
 
+def _probe_nvenc() -> bool:
+    """Return True if ffmpeg with h264_nvenc is available on this machine."""
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "h264_nvenc" in r.stdout
+    except Exception:
+        return False
+
+
+class _FFmpegWriter:
+    """Drop-in replacement for cv2.VideoWriter that uses ffmpeg NVENC."""
+    def __init__(self, path: Path, fps: float, w: int, h: int) -> None:
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-vcodec", "rawvideo",
+            "-s", f"{w}x{h}", "-pix_fmt", "bgr24",
+            "-r", str(fps), "-i", "pipe:0",
+            "-c:v", "h264_nvenc", "-preset", "p4",
+            "-pix_fmt", "yuv420p",
+            str(path),
+        ]
+        self._proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+
+    def write(self, frame) -> None:
+        self._proc.stdin.write(frame.tobytes())
+
+    def release(self) -> None:
+        self._proc.stdin.close()
+        self._proc.wait()
+
+
+def _open_writer(path: Path, fps: float, w: int, h: int):
+    """Return an NVENC writer if available, otherwise fall back to cv2."""
+    if _probe_nvenc():
+        try:
+            writer = _FFmpegWriter(path, fps, w, h)
+            print("  [video] using ffmpeg NVENC encoder")
+            return writer
+        except Exception:
+            pass
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    return cv2.VideoWriter(str(path), fourcc, fps, (w, h))
+
+
 def render_annotated_video(
     results:    list[dict],
     calib:      dict,
@@ -570,8 +619,7 @@ def render_annotated_video(
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps / stride, (w, h))
+    writer = _open_writer(out_path, fps / stride, w, h)
 
     raw_idx = 0
     with tqdm(total=(total + stride - 1) // stride,

@@ -256,7 +256,7 @@ def make_cotracker_task(
     video_path: Path,
     dye_click:  tuple[int, int],
     stride:     int = 4,
-    chunk_size: int = 200,
+    chunk_size: int = 400,
 ) -> Task:
     stem = _stem(video_path)
     return Task(

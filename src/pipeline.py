@@ -32,6 +32,15 @@ concurrently wherever the dependency graph and GPU VRAM allow:
     SAM2 + CoTracker both hold a GPU slot simultaneously.
     Phase 1a starts (CPU) the moment SAM2 finishes.
     Total wall-clock ≈ max(SAM2, CoTracker) rather than SAM2 + CoTracker.
+
+SAM2 vs CoTracker stride mismatch
+----------------------------------
+SAM2 may run at a finer stride (e.g. 4) than CoTracker (e.g. 8) to improve
+centroid/mask accuracy without slowing CoTracker.  The nearest() function in
+run_approach_b.py already handles the mismatch: body-frame angle lookup snaps
+to the closest available dye frame (max error = half the CoTracker stride =
+33 ms at stride 8 / 120 fps).  For Cassiopea which barely rotates, this is
+negligible.
 """
 
 from __future__ import annotations
@@ -103,7 +112,8 @@ def run_pipeline(
     dye_click:    tuple[int, int],
     calib_path:   Path,
     *,
-    stride:           int   = 4,
+    stride:           int   = 4,   # SAM2 + Phase 1a/1b stride
+    cotracker_stride: int | None = None,   # CoTracker stride (defaults to stride)
     window_size:      int   = 200,
     save_n_masks:     int   = 20,
     inner_frac:       float = 0.75,
@@ -138,6 +148,7 @@ def run_pipeline(
     """
     if cancel_event is None:
         cancel_event = threading.Event()
+    ct_stride = cotracker_stride if cotracker_stride is not None else stride
 
     OUTPUTS_DIR.mkdir(exist_ok=True)
     stem = video_path.stem
@@ -159,7 +170,7 @@ def run_pipeline(
         # main branch: CoTracker handles dye tracking separately
         scheduler.add(make_cotracker_task(
             video_path, dye_click,
-            stride=stride, chunk_size=200,
+            stride=ct_stride, chunk_size=400,
         ))
     scheduler.add(make_phase1a_task(
         video_path,

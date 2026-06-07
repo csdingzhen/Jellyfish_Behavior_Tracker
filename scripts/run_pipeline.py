@@ -17,9 +17,11 @@ The script prints a live progress table while the pipeline runs.
 """
 
 import argparse
+import json
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -27,7 +29,7 @@ import cv2
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import OUTPUTS_DIR
-from src.pipeline import run_pipeline
+from src.pipeline import PipelineResult, run_pipeline
 from src.scheduler import ProgressEvent, TaskStatus
 from src.resources import HARDWARE
 
@@ -195,6 +197,74 @@ def collect_clicks(video_path: Path) -> tuple[tuple[int, int], tuple[int, int]] 
     return bell_click, dye_click
 
 
+# ── Run log ───────────────────────────────────────────────────────────────────
+
+def write_run_log(
+    video_path:  Path,
+    calib_path:  Path,
+    args,
+    wall_s:      float,
+    result:      PipelineResult,
+) -> Path:
+    """
+    Write a JSON log of config + timing to <output_dir>/<stem>/<stem>_run_log.json.
+    Appends to a list so multiple runs of the same video accumulate in one file.
+    Returns the log file path.
+    """
+    stem    = video_path.stem
+    log_dir = OUTPUTS_DIR / stem
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{stem}_run_log.json"
+
+    entry = {
+        "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "video":      video_path.name,
+        "calib":      calib_path.name,
+        "config": {
+            "sam2_stride":       args.stride,
+            "cotracker_stride":  args.cotracker_stride,
+            "image_size_px":     args.image_size,
+            "window_size":       args.window_size,
+            "inner_frac":        args.inner_frac,
+            "outer_frac":        args.outer_frac,
+            "pre_window":        args.pre_window,
+            "min_distance_s":    args.min_distance,
+            "prominence":        args.prominence,
+            "save_n_masks":      args.save_n_masks,
+            "gpu_approach_b":    not args.no_gpu_approach_b,
+        },
+        "hardware": {
+            "gpu":               HARDWARE.gpu_name,
+            "vram_gb":           round(HARDWARE.gpu_vram_gb, 1),
+            "max_gpu_concurrent": HARDWARE.max_gpu_concurrent,
+        },
+        "task_timing": {
+            name: {
+                "status":      result.task_status.get(name, "-"),
+                "elapsed_s":   round(result.task_elapsed.get(name, 0.0), 1),
+                "elapsed_str": _fmt_time(result.task_elapsed.get(name, 0.0)),
+            }
+            for name in result.task_status
+        },
+        "total_wall_s":   round(wall_s, 1),
+        "total_wall_str": _fmt_time(wall_s),
+        "success":        result.success,
+        "cancelled":      result.cancelled,
+        "errors":         {k: v.splitlines()[0] for k, v in result.errors.items()},
+    }
+
+    # Load existing runs, append, write back
+    runs = []
+    if log_path.exists():
+        try:
+            runs = json.loads(log_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            runs = []
+    runs.append(entry)
+    log_path.write_text(json.dumps(runs, indent=2))
+    return log_path
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -203,8 +273,11 @@ def main() -> None:
     ap.add_argument("--video",        default="data/test_clip_1min.mp4")
     ap.add_argument("--calib",        default=None,
                     help="Path to calibration JSON (auto-detected if omitted)")
-    ap.add_argument("--stride",       type=int,   default=8,
-                    help="Frame stride (default 8 = 15fps on this branch)")
+    ap.add_argument("--stride",       type=int,   default=4,
+                    help="SAM2 frame stride (default 4 = 30fps effective at 120fps)")
+    ap.add_argument("--cotracker-stride", type=int, default=8,
+                    help="CoTracker frame stride (default 8); can be larger than --stride "
+                         "since nearest-frame interpolation handles the mismatch")
     ap.add_argument("--window-size",  type=int,   default=400,
                     help="SAM2 window size (default 400, larger = less overhead)")
     ap.add_argument("--inner-frac",   type=float, default=0.85)
@@ -241,7 +314,8 @@ def main() -> None:
     print(f"  Calib    : {calib_path.name}")
     print(f"  GPU      : {HARDWARE.gpu_name}  ({HARDWARE.gpu_vram_gb:.1f} GB)")
     print(f"  Parallel : up to {HARDWARE.max_gpu_concurrent} GPU tasks simultaneously")
-    print(f"  Stride   : {args.stride}  ({120/args.stride:.0f} fps effective at 120fps)\n")
+    print(f"  SAM2 stride    : {args.stride}  ({120/args.stride:.0f} fps effective at 120fps)")
+    print(f"  CoTrack stride : {args.cotracker_stride}  ({120/args.cotracker_stride:.0f} fps effective at 120fps)\n")
 
     # Collect click points
     clicks = collect_clicks(video_path)
@@ -268,11 +342,12 @@ def main() -> None:
 
     try:
         result = run_pipeline(
-            video_path  = video_path,
-            bell_click  = bell_click,
-            dye_click   = dye_click,
-            calib_path  = calib_path,
-            stride      = args.stride,
+            video_path       = video_path,
+            bell_click       = bell_click,
+            dye_click        = dye_click,
+            calib_path       = calib_path,
+            stride           = args.stride,
+            cotracker_stride = args.cotracker_stride,
             window_size = args.window_size,
             inner_frac  = args.inner_frac,
             outer_frac  = args.outer_frac,
@@ -302,6 +377,9 @@ def main() -> None:
         print(f"  {name:<35s} {status:<10s} {t_str:>8}")
     print(f"\n  Total wall-clock: {_fmt_time(wall)}")
     print(f"{'='*60}")
+
+    log_path = write_run_log(video_path, calib_path, args, wall, result)
+    print(f"\n  Run log: {log_path}")
 
     if result.success:
         print("\nOutputs:")
