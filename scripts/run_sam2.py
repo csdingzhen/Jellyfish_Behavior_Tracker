@@ -44,6 +44,10 @@ from pathlib import Path as _Path
 
 SAM2_CFG      = "configs/sam2.1/sam2.1_hiera_b+.yaml"
 
+# Performance branch defaults
+WINDOW_SIZE   = 400    # larger windows = fewer init_state calls = less overhead
+PERF_IMAGE_SZ = 512    # internal ViT resolution (vs default 1024) — 4x fewer pixels
+
 # Available model variants — (config, weights_filename, display_name)
 SAM2_MODELS = {
     "tiny":  ("configs/sam2.1/sam2.1_hiera_t.yaml",
@@ -203,9 +207,10 @@ def run_sam2(
     total_frames: int,
     window_size: int,
     save_indices: set[int],
-    progress_callback=None,   # (current, total, message) — for scheduler/UI
-    cancel_event=None,        # threading.Event — checked between windows
-) -> tuple[list[tuple[float, float, float]], np.ndarray]:
+    dye_click: tuple[int, int] | None = None,   # PERF: track dye as obj_id=2
+    progress_callback=None,
+    cancel_event=None,
+) -> tuple[list[tuple[float, float, float]], np.ndarray, list[tuple[float, float]]]:
     """
     Propagate SAM2 through all frames using non-overlapping windows.
 
@@ -215,14 +220,16 @@ def run_sam2(
     Only frames whose index is in save_indices are written to disk as PNGs.
     Centroid stats and bell contour radii are computed for every frame.
 
-    Returns (stats, contour_radii) where:
+    Returns (stats, contour_radii, dye_track) where:
         stats          : list[(cx, cy, radius)] indexed by extracted-frame index
         contour_radii  : np.ndarray shape (total_frames, N_CONTOUR_ANGLES) float32
+        dye_track      : list[(dx, dy)] per extracted frame — empty if dye_click is None
     """
     if save_indices:
         mask_dir.mkdir(parents=True, exist_ok=True)
 
     contour_arr = np.zeros((total_frames, N_CONTOUR_ANGLES), dtype=np.float32)
+    dye_track:  list[tuple[float, float]] = []   # populated only when dye_click is given
 
     # Temp directory holding only the current window's frames.
     # SAM2's init_state pre-allocates one tensor for ALL files in the directory
@@ -231,8 +238,9 @@ def run_sam2(
     # subdir bounds that to window_size × ~12 MB ≈ 2.4 GB for window=200.
     win_dir = frames_dir.parent / "_sam2_win_tmp"
 
-    all_stats: list[tuple[float, float, float]] = []
-    prev_mask: np.ndarray | None = None
+    all_stats:    list[tuple[float, float, float]] = []
+    prev_mask:    np.ndarray | None = None
+    prev_dye_mask: np.ndarray | None = None
     all_jpgs  = sorted(frames_dir.glob("*.jpg"))
     n_windows = math.ceil(total_frames / window_size)
 
@@ -263,14 +271,16 @@ def run_sam2(
                     shutil.copy2(all_jpgs[global_idx], dst)
 
             # init_state sees only window_size frames -> bounded RAM
+            # async_loading_frames=True overlaps disk I/O with GPU encode (~10% faster)
             with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
                 state = predictor.init_state(
                     str(win_dir),
                     offload_video_to_cpu=True,
                     offload_state_to_cpu=True,
+                    async_loading_frames=True,
                 )
 
-                # Prompts always use local (0-based) indices within win_dir
+                # obj_id=1: bell mask  |  obj_id=2: dye mark (PERF branch)
                 if prev_mask is None:
                     predictor.add_new_points_or_box(
                         state, frame_idx=0, obj_id=1,
@@ -278,20 +288,40 @@ def run_sam2(
                                           float(click_point[1])]], dtype=np.float32),
                         labels=np.array([1], dtype=np.int32),
                     )
+                    if dye_click is not None:
+                        predictor.add_new_points_or_box(
+                            state, frame_idx=0, obj_id=2,
+                            points=np.array([[float(dye_click[0]),
+                                              float(dye_click[1])]], dtype=np.float32),
+                            labels=np.array([1], dtype=np.int32),
+                        )
                 else:
                     predictor.add_new_mask(
                         state, frame_idx=0, obj_id=1, mask=prev_mask,
                     )
+                    if dye_click is not None and prev_dye_mask is not None:
+                        predictor.add_new_mask(
+                            state, frame_idx=0, obj_id=2, mask=prev_dye_mask,
+                        )
 
-                local_masks: dict[int, np.ndarray] = {}
-                for local_idx, _, logits in tqdm(
+                local_masks:     dict[int, np.ndarray] = {}
+                local_dye_masks: dict[int, np.ndarray] = {}
+
+                for local_idx, obj_ids, logits in tqdm(
                     predictor.propagate_in_video(state, max_frame_num_to_track=n),
                     total=n,
                     desc=f"  SAM2 win {win_idx + 1}",
                     unit="fr",
                     leave=False,
                 ):
-                    local_masks[local_idx] = (logits[0, 0] > 0.0).cpu().numpy()
+                    # obj_ids is a list; find position of id=1 and id=2
+                    id_list = list(obj_ids)
+                    if 1 in id_list:
+                        local_masks[local_idx] = (
+                            logits[id_list.index(1), 0] > 0.0).cpu().numpy()
+                    if dye_click is not None and 2 in id_list:
+                        local_dye_masks[local_idx] = (
+                            logits[id_list.index(2), 0] > 0.0).cpu().numpy()
 
             # Map local indices back to global; write PNGs, compute stats + contour
             for local_idx in range(n):
@@ -299,6 +329,7 @@ def run_sam2(
                 mask = local_masks.get(local_idx)
                 if mask is None:
                     all_stats.append((0.0, 0.0, 0.0))
+                    dye_track.append((0.0, 0.0))
                     continue
                 if global_idx in save_indices:
                     cv2.imwrite(
@@ -310,15 +341,30 @@ def run_sam2(
                 cx, cy, radius = stats
                 contour_arr[global_idx] = mask_to_contour(mask, cx, cy, radius)
 
-            # Last mask of this window is the prompt for the next window
+                # Dye position: centroid of obj_id=2 mask
+                if dye_click is not None:
+                    dye_mask = local_dye_masks.get(local_idx)
+                    if dye_mask is not None and dye_mask.any():
+                        dm = cv2.moments(dye_mask.astype(np.uint8))
+                        if dm["m00"] > 0:
+                            dye_track.append((dm["m10"] / dm["m00"],
+                                              dm["m01"] / dm["m00"]))
+                        else:
+                            dye_track.append((0.0, 0.0))
+                    else:
+                        dye_track.append((0.0, 0.0))
+
+            # Last masks of this window seed the next window
             if local_masks:
                 prev_mask = local_masks[max(local_masks)]
+            if dye_click is not None and local_dye_masks:
+                prev_dye_mask = local_dye_masks[max(local_dye_masks)]
 
     finally:
         if win_dir.exists():
             shutil.rmtree(win_dir)
 
-    return all_stats, contour_arr
+    return all_stats, contour_arr, dye_track
 
 
 # ── Validation mosaic ─────────────────────────────────────────────────────────
@@ -472,6 +518,11 @@ def main() -> None:
     ap.add_argument("--sam2-model", default="base",
                     choices=list(SAM2_MODELS.keys()),
                     help="SAM2 model size: tiny (~38MB, ~4x faster), small, base (default), large")
+    ap.add_argument("--image-size", type=int, default=None,
+                    help="Override SAM2 internal ViT resolution (e.g. 512). "
+                         "Default is model-native (1024). Lower = faster, slight accuracy loss.")
+    ap.add_argument("--track-dye", action="store_true",
+                    help="Also track dye mark as obj_id=2 inside SAM2 (PERF: eliminates CoTracker)")
     args = ap.parse_args()
 
     root       = Path(__file__).parent.parent
@@ -515,7 +566,15 @@ def main() -> None:
     point = ClickSelector(first_bgr, DISPLAY_SCALE).run()
     if point is None:
         sys.exit("No point selected.")
-    print(f"Prompt point: x={point[0]}, y={point[1]}")
+    print(f"Bell prompt : x={point[0]}, y={point[1]}")
+
+    dye_point = None
+    if args.track_dye:
+        print("Click the DYE MARK (tracked as obj_id=2 inside SAM2)")
+        dye_point = ClickSelector(first_bgr, DISPLAY_SCALE).run()
+        if dye_point is None:
+            sys.exit("No dye point selected.")
+        print(f"Dye prompt  : x={dye_point[0]}, y={dye_point[1]}")
 
     # ── 3. Load SAM2 ──────────────────────────────────────────────────────────
     model_cfg, model_file, model_name = SAM2_MODELS[args.sam2_model]
@@ -527,9 +586,18 @@ def main() -> None:
                  f"/092824/{model_file} -OutFile {model_weights}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Loading SAM2 [{model_name}] on {device}...")
+    overrides = []
+    if args.image_size:
+        overrides.append(f"++model.image_size={args.image_size}")
+        print(f"Loading SAM2 [{model_name}] on {device} "
+              f"(internal resolution overridden to {args.image_size}px)...")
+    else:
+        print(f"Loading SAM2 [{model_name}] on {device}...")
     from sam2.build_sam import build_sam2_video_predictor
-    predictor = build_sam2_video_predictor(model_cfg, str(model_weights), device=device)
+    predictor = build_sam2_video_predictor(
+        model_cfg, str(model_weights), device=device,
+        hydra_overrides_extra=overrides if overrides else None,
+    )
     if device.type == "cuda":
         predictor.image_encoder = torch.compile(
             predictor.image_encoder, mode="reduce-overhead"
@@ -549,9 +617,10 @@ def main() -> None:
 
     # ── 5. Propagate ─────────────────────────────────────────────────────────
     print(f"\nRunning SAM2 propagation...")
-    seg_stats, contour_arr = run_sam2(
+    seg_stats, contour_arr, dye_track_list = run_sam2(
         predictor, frames_dir, point, mask_dir,
         n_extracted, args.window_size, save_indices,
+        dye_click=dye_point,
     )
 
     # ── 5b. Save contour radii ────────────────────────────────────────────────
@@ -569,6 +638,19 @@ def main() -> None:
         for i, (cx, cy, r) in enumerate(seg_stats):
             raw = i * args.stride
             wr.writerow([raw, f"{raw / fps_raw:.4f}", f"{cx:.2f}", f"{cy:.2f}", f"{r:.2f}"])
+
+    # ── 6b. Save dye track CSV (same format as CoTracker) — PERF branch only ──
+    if dye_point is not None and dye_track_list:
+        track_csv = OUTPUTS_DIR / f"{stem}_track.csv"
+        print(f"Writing dye track CSV (from SAM2 obj_id=2): {track_csv}")
+        with open(track_csv, "w", newline="") as f:
+            wr = csv.writer(f)
+            wr.writerow(["frame_idx", "timestamp_s", "x", "y", "visible"])
+            for i, (dx, dy) in enumerate(dye_track_list):
+                raw = i * args.stride
+                visible = 1 if (dx > 0 or dy > 0) else 0
+                wr.writerow([raw, f"{raw / fps_raw:.4f}",
+                             f"{dx:.2f}", f"{dy:.2f}", visible])
 
     # ── 7. Validation mosaic ──────────────────────────────────────────────────
     dye_csv_path = None

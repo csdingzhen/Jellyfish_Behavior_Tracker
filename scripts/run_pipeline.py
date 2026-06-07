@@ -17,8 +17,11 @@ The script prints a live progress table while the pipeline runs.
 """
 
 import argparse
+import json
 import sys
 import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -26,7 +29,7 @@ import cv2
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import OUTPUTS_DIR
-from src.pipeline import run_pipeline
+from src.pipeline import PipelineResult, run_pipeline
 from src.scheduler import ProgressEvent, TaskStatus
 from src.resources import HARDWARE
 
@@ -43,14 +46,28 @@ def _clear_lines(n: int) -> None:
         print(f"\033[{n}A\033[J", end="", flush=True)
 
 
-def make_cli_progress(task_names: list[str]):
-    """
-    Returns a ProgressCallback that prints a live updating table.
+def _fmt_time(s: float) -> str:
+    """Format elapsed seconds as a compact string: 45s / 2m34s / 1h02m."""
+    if s < 1:
+        return ""
+    if s < 60:
+        return f"{s:.0f}s"
+    m = int(s // 60)
+    sec = int(s % 60)
+    if m < 60:
+        return f"{m}m{sec:02d}s"
+    return f"{m//60}h{m%60:02d}m"
 
-    Each task gets one row; the last row shows overall pipeline progress.
+
+def make_cli_progress(task_names: list[str], pipeline_start: float):
+    """
+    Returns a ProgressCallback that prints a live updating table with timers.
+
+    Each task row shows: icon | name | progress bar | pct | message | elapsed
+    The last row shows overall progress + total pipeline elapsed time.
     Thread-safe — multiple tasks may call this simultaneously.
     """
-    _lock    = threading.Lock()
+    _lock   = threading.Lock()
     _state: dict[str, ProgressEvent] = {}
 
     STATUS_ICON = {
@@ -69,20 +86,27 @@ def make_cli_progress(task_names: list[str]):
         for name in task_names:
             ev = _state.get(name)
             if ev is None:
-                lines.append(f"  ○  {name}")
+                lines.append(f"  [ ]  {name}")
                 continue
-            icon = STATUS_ICON.get(ev.status, "?")
-            pct  = ev.fraction * 100
-            filled = round(ev.fraction * _BAR_WIDTH)
-            bar  = "█" * filled + "░" * (_BAR_WIDTH - filled)
-            msg  = (ev.message or "")[:40]
-            lines.append(f"  {icon}  {name:<35s} [{bar}] {pct:5.1f}%  {msg}")
+            icon    = STATUS_ICON.get(ev.status, "?")
+            pct     = ev.fraction * 100
+            filled  = round(ev.fraction * _BAR_WIDTH)
+            bar     = "#" * filled + "." * (_BAR_WIDTH - filled)
+            msg     = (ev.message or "")[:32]
+            t_str   = _fmt_time(ev.elapsed_s)
+            time_col = f"[{t_str:>6}]" if t_str else "        "
+            lines.append(
+                f"  {icon}  {name:<33s} [{bar}] {pct:5.1f}%  {time_col}  {msg}"
+            )
 
-        # Overall progress bar
-        overall = max((e.overall_fraction for e in _state.values()), default=0.0)
-        filled  = round(overall * _BAR_WIDTH)
-        bar     = "█" * filled + "░" * (_BAR_WIDTH - filled)
-        lines.append(f"\n  Overall [{bar}] {overall*100:5.1f}%")
+        # Overall row with pipeline wall clock
+        overall      = max((e.overall_fraction for e in _state.values()), default=0.0)
+        filled       = round(overall * _BAR_WIDTH)
+        bar          = "#" * filled + "." * (_BAR_WIDTH - filled)
+        wall_elapsed = _fmt_time(time.time() - pipeline_start)
+        lines.append(
+            f"\n  Overall [{bar}] {overall*100:5.1f}%   wall: {wall_elapsed}"
+        )
 
         _clear_lines(_last_lines)
         output = "\n".join(lines)
@@ -173,6 +197,74 @@ def collect_clicks(video_path: Path) -> tuple[tuple[int, int], tuple[int, int]] 
     return bell_click, dye_click
 
 
+# ── Run log ───────────────────────────────────────────────────────────────────
+
+def write_run_log(
+    video_path:  Path,
+    calib_path:  Path,
+    args,
+    wall_s:      float,
+    result:      PipelineResult,
+) -> Path:
+    """
+    Write a JSON log of config + timing to <output_dir>/<stem>/<stem>_run_log.json.
+    Appends to a list so multiple runs of the same video accumulate in one file.
+    Returns the log file path.
+    """
+    stem    = video_path.stem
+    log_dir = OUTPUTS_DIR / stem
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{stem}_run_log.json"
+
+    entry = {
+        "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "video":      video_path.name,
+        "calib":      calib_path.name,
+        "config": {
+            "sam2_stride":       args.stride,
+            "cotracker_stride":  args.cotracker_stride,
+            "image_size_px":     args.image_size,
+            "window_size":       args.window_size,
+            "inner_frac":        args.inner_frac,
+            "outer_frac":        args.outer_frac,
+            "pre_window":        args.pre_window,
+            "min_distance_s":    args.min_distance,
+            "prominence":        args.prominence,
+            "save_n_masks":      args.save_n_masks,
+            "gpu_approach_b":    not args.no_gpu_approach_b,
+        },
+        "hardware": {
+            "gpu":               HARDWARE.gpu_name,
+            "vram_gb":           round(HARDWARE.gpu_vram_gb, 1),
+            "max_gpu_concurrent": HARDWARE.max_gpu_concurrent,
+        },
+        "task_timing": {
+            name: {
+                "status":      result.task_status.get(name, "-"),
+                "elapsed_s":   round(result.task_elapsed.get(name, 0.0), 1),
+                "elapsed_str": _fmt_time(result.task_elapsed.get(name, 0.0)),
+            }
+            for name in result.task_status
+        },
+        "total_wall_s":   round(wall_s, 1),
+        "total_wall_str": _fmt_time(wall_s),
+        "success":        result.success,
+        "cancelled":      result.cancelled,
+        "errors":         {k: v.splitlines()[0] for k, v in result.errors.items()},
+    }
+
+    # Load existing runs, append, write back
+    runs = []
+    if log_path.exists():
+        try:
+            runs = json.loads(log_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            runs = []
+    runs.append(entry)
+    log_path.write_text(json.dumps(runs, indent=2))
+    return log_path
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -181,15 +273,24 @@ def main() -> None:
     ap.add_argument("--video",        default="data/test_clip_1min.mp4")
     ap.add_argument("--calib",        default=None,
                     help="Path to calibration JSON (auto-detected if omitted)")
-    ap.add_argument("--stride",       type=int,   default=4)
-    ap.add_argument("--window-size",  type=int,   default=200)
-    ap.add_argument("--chunk-size",   type=int,   default=200)
+    ap.add_argument("--stride",       type=int,   default=4,
+                    help="SAM2 frame stride (default 4 = 30fps effective at 120fps)")
+    ap.add_argument("--cotracker-stride", type=int, default=8,
+                    help="CoTracker frame stride (default 8); can be larger than --stride "
+                         "since nearest-frame interpolation handles the mismatch")
+    ap.add_argument("--window-size",  type=int,   default=400,
+                    help="SAM2 window size (default 400, larger = less overhead)")
     ap.add_argument("--inner-frac",   type=float, default=0.85)
     ap.add_argument("--outer-frac",   type=float, default=1.05)
     ap.add_argument("--pre-window",   type=int,   default=30)
     ap.add_argument("--min-distance", type=float, default=0.42)
     ap.add_argument("--prominence",   type=float, default=0.08)
     ap.add_argument("--save-n-masks", type=int,   default=20)
+    # PERF branch options
+    ap.add_argument("--image-size",   type=int,   default=512,
+                    help="SAM2 internal ViT resolution (default 512 on perf branch)")
+    ap.add_argument("--no-gpu-approach-b", action="store_true",
+                    help="Disable GPU grid_sample for Approach B (fall back to CPU)")
     args = ap.parse_args()
 
     root       = Path(__file__).parent.parent
@@ -213,7 +314,8 @@ def main() -> None:
     print(f"  Calib    : {calib_path.name}")
     print(f"  GPU      : {HARDWARE.gpu_name}  ({HARDWARE.gpu_vram_gb:.1f} GB)")
     print(f"  Parallel : up to {HARDWARE.max_gpu_concurrent} GPU tasks simultaneously")
-    print(f"  Stride   : {args.stride}  ({120/args.stride:.0f} fps effective at 120fps)\n")
+    print(f"  SAM2 stride    : {args.stride}  ({120/args.stride:.0f} fps effective at 120fps)")
+    print(f"  CoTrack stride : {args.cotracker_stride}  ({120/args.cotracker_stride:.0f} fps effective at 120fps)\n")
 
     # Collect click points
     clicks = collect_clicks(video_path)
@@ -221,7 +323,10 @@ def main() -> None:
         sys.exit(0)
     bell_click, dye_click = clicks
 
-    # Set up progress display
+    # PERF branch: CoTracker retained for accuracy — SAM2 dye tracking was tested
+    # and found unreliable for faint dye marks. Other perf optimisations still apply.
+    _sam2_tracks_dye = False
+
     task_names = [
         "SAM2 segmentation",
         "CoTracker tracking",
@@ -229,37 +334,52 @@ def main() -> None:
         "Body-frame rotation",
         "Pulse initiation analysis",
     ]
-    cancel_event = threading.Event()
-    progress_cb  = make_cli_progress(task_names)
+    cancel_event   = threading.Event()
+    pipeline_start = time.time()
+    progress_cb    = make_cli_progress(task_names, pipeline_start)
 
     print("\nRunning pipeline...\n")
 
     try:
         result = run_pipeline(
-            video_path  = video_path,
-            bell_click  = bell_click,
-            dye_click   = dye_click,
-            calib_path  = calib_path,
-            stride      = args.stride,
+            video_path       = video_path,
+            bell_click       = bell_click,
+            dye_click        = dye_click,
+            calib_path       = calib_path,
+            stride           = args.stride,
+            cotracker_stride = args.cotracker_stride,
             window_size = args.window_size,
-            chunk_size  = args.chunk_size,
             inner_frac  = args.inner_frac,
             outer_frac  = args.outer_frac,
             pre_window  = args.pre_window,
             min_distance= args.min_distance,
             prominence  = args.prominence,
             save_n_masks= args.save_n_masks,
-            progress_callback = progress_cb,
-            cancel_event      = cancel_event,
+            # PERF branch: SAM2 tracks dye internally, GPU Approach B, 512px
+            sam2_tracks_dye     = _sam2_tracks_dye,
+            image_size          = args.image_size,
+            use_gpu_approach_b  = not args.no_gpu_approach_b,
+            progress_callback   = progress_cb,
+            cancel_event        = cancel_event,
         )
     except KeyboardInterrupt:
         cancel_event.set()
         print("\nCancelled by user.")
         sys.exit(1)
 
+    wall = time.time() - pipeline_start
     print(f"\n{'='*60}")
     print(result.summary())
+    print(f"\nTask timings:")
+    for name, status in result.task_status.items():
+        t = result.task_elapsed.get(name, 0.0)
+        t_str = _fmt_time(t) if t > 0 else "-"
+        print(f"  {name:<35s} {status:<10s} {t_str:>8}")
+    print(f"\n  Total wall-clock: {_fmt_time(wall)}")
     print(f"{'='*60}")
+
+    log_path = write_run_log(video_path, calib_path, args, wall, result)
+    print(f"\n  Run log: {log_path}")
 
     if result.success:
         print("\nOutputs:")

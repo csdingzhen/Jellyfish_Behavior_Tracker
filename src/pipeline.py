@@ -32,6 +32,15 @@ concurrently wherever the dependency graph and GPU VRAM allow:
     SAM2 + CoTracker both hold a GPU slot simultaneously.
     Phase 1a starts (CPU) the moment SAM2 finishes.
     Total wall-clock ≈ max(SAM2, CoTracker) rather than SAM2 + CoTracker.
+
+SAM2 vs CoTracker stride mismatch
+----------------------------------
+SAM2 may run at a finer stride (e.g. 4) than CoTracker (e.g. 8) to improve
+centroid/mask accuracy without slowing CoTracker.  The nearest() function in
+run_approach_b.py already handles the mismatch: body-frame angle lookup snaps
+to the closest available dye frame (max error = half the CoTracker stride =
+33 ms at stride 8 / 120 fps).  For Cassiopea which barely rotates, this is
+negligible.
 """
 
 from __future__ import annotations
@@ -77,6 +86,7 @@ class PipelineResult:
     elapsed_s:      float             = 0.0
     success:        bool              = False
     task_status:    dict[str, str]    = field(default_factory=dict)
+    task_elapsed:   dict[str, float]  = field(default_factory=dict)
     errors:         dict[str, str]    = field(default_factory=dict)
     cancelled:      bool              = False
 
@@ -102,16 +112,20 @@ def run_pipeline(
     dye_click:    tuple[int, int],
     calib_path:   Path,
     *,
-    stride:         int   = 4,
-    window_size:    int   = 200,
-    save_n_masks:   int   = 20,
-    chunk_size:     int   = 200,
-    inner_frac:     float = 0.75,
-    outer_frac:     float = 1.05,
-    pre_window:     int   = 30,
-    min_distance:   float = 0.42,
-    prominence:     float = 0.05,
-    delete_frames:  bool  = True,
+    stride:           int   = 4,   # SAM2 + Phase 1a/1b stride
+    cotracker_stride: int | None = None,   # CoTracker stride (defaults to stride)
+    window_size:      int   = 200,
+    save_n_masks:     int   = 20,
+    inner_frac:       float = 0.75,
+    outer_frac:       float = 1.05,
+    pre_window:       int   = 30,
+    min_distance:     float = 0.42,
+    prominence:       float = 0.05,
+    delete_frames:    bool  = True,
+    # PERF branch options
+    sam2_tracks_dye:  bool      = False,   # SAM2 obj_id=2 replaces CoTracker
+    image_size:       int | None = None,   # SAM2 internal ViT resolution override
+    use_gpu_approach_b: bool    = False,   # GPU grid_sample for margin diff
     progress_callback: ProgressCallback | None = None,
     cancel_event:      threading.Event  | None = None,
 ) -> PipelineResult:
@@ -134,6 +148,7 @@ def run_pipeline(
     """
     if cancel_event is None:
         cancel_event = threading.Event()
+    ct_stride = cotracker_stride if cotracker_stride is not None else stride
 
     OUTPUTS_DIR.mkdir(exist_ok=True)
     stem = video_path.stem
@@ -148,16 +163,22 @@ def run_pipeline(
         video_path, bell_click,
         stride=stride, window_size=window_size,
         save_n_masks=save_n_masks, delete_frames=delete_frames,
+        dye_click=dye_click if sam2_tracks_dye else None,
+        image_size=image_size,
     ))
-    scheduler.add(make_cotracker_task(
-        video_path, dye_click,
-        stride=stride, chunk_size=chunk_size,
-    ))
+    if not sam2_tracks_dye:
+        # main branch: CoTracker handles dye tracking separately
+        scheduler.add(make_cotracker_task(
+            video_path, dye_click,
+            stride=ct_stride, chunk_size=400,
+        ))
     scheduler.add(make_phase1a_task(
         video_path,
         stride=stride, inner_frac=inner_frac, outer_frac=outer_frac,
+        use_gpu=use_gpu_approach_b,
     ))
-    scheduler.add(make_phase1b_task(video_path, stride=stride))
+    scheduler.add(make_phase1b_task(video_path, stride=stride,
+                                    sam2_tracks_dye=sam2_tracks_dye))
     scheduler.add(make_analysis_task(
         video_path, calib_path,
         stride=stride, pre_window=pre_window,
@@ -185,6 +206,7 @@ def run_pipeline(
         elapsed_s       = elapsed,
         success         = success,
         task_status     = {n: s.name for n, s in snap.status.items()},
+        task_elapsed    = snap.elapsed,
         errors          = snap.errors,
         cancelled       = snap.is_cancelled,
     )

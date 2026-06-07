@@ -74,6 +74,7 @@ class ProgressEvent:
     overall_fraction: float      = 0.0
     status:           TaskStatus = TaskStatus.RUNNING
     error:            str | None = None
+    elapsed_s:        float      = 0.0   # seconds since task started (UI: show as "2m 34s")
 
 
 # Callback type the UI (or CLI printer) implements
@@ -144,13 +145,15 @@ class Scheduler:
         self._cancel          = cancel_event or threading.Event()
         self._max_workers     = max_workers
 
-        self._tasks:    dict[str, Task]       = {}
-        self._status:   dict[str, TaskStatus] = {}
-        self._progress: dict[str, float]      = {}
-        self._messages: dict[str, str]        = {}
-        self._errors:   dict[str, str]        = {}
-        self._results:  dict[str, Any]        = {}
-        self._lock      = threading.Lock()
+        self._tasks:       dict[str, Task]       = {}
+        self._status:      dict[str, TaskStatus] = {}
+        self._progress:    dict[str, float]      = {}
+        self._messages:    dict[str, str]        = {}
+        self._errors:      dict[str, str]        = {}
+        self._results:     dict[str, Any]        = {}
+        self._start_times: dict[str, float]      = {}   # wall time when task started
+        self._end_times:   dict[str, float]      = {}   # wall time when task finished
+        self._lock         = threading.Lock()
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -244,6 +247,10 @@ class Scheduler:
                 progress=dict(self._progress),
                 messages=dict(self._messages),
                 errors=dict(self._errors),
+                elapsed={
+                    name: self._elapsed(name)
+                    for name in self._tasks
+                },
                 overall_fraction=self._overall_fraction(),
                 is_running=any(
                     s == TaskStatus.RUNNING for s in self._status.values()
@@ -267,11 +274,20 @@ class Scheduler:
         )
         return done_w / total_w
 
+    def _elapsed(self, task_name: str) -> float:
+        """Seconds since the task started (0 if not started yet)."""
+        t0 = self._start_times.get(task_name)
+        if t0 is None:
+            return 0.0
+        t1 = self._end_times.get(task_name, time.time())
+        return t1 - t0
+
     def _emit(self, event: ProgressEvent) -> None:
         with self._lock:
             self._progress[event.task_name] = event.fraction
             self._messages[event.task_name] = event.message
             event.overall_fraction = self._overall_fraction()
+            event.elapsed_s        = self._elapsed(event.task_name)
         if self._progress_cb:
             self._progress_cb(event)
 
@@ -335,6 +351,10 @@ class Scheduler:
             self._gpu_gate.acquire()
             acquired_gpu = True
 
+        # Record start time
+        with self._lock:
+            self._start_times[task.name] = time.time()
+
         self._set_status(task.name, TaskStatus.RUNNING)
         self._emit(ProgressEvent(
             task_name=task.name, current=0, total=1,
@@ -349,6 +369,8 @@ class Scheduler:
                 **task.task_kwargs,
             )
             self._results[task.name] = result
+            with self._lock:
+                self._end_times[task.name] = time.time()
             self._set_status(task.name, TaskStatus.DONE)
             self._emit(ProgressEvent(
                 task_name=task.name, current=1, total=1,
@@ -359,7 +381,8 @@ class Scheduler:
         except Exception as exc:
             err = traceback.format_exc()
             with self._lock:
-                self._errors[task.name] = err
+                self._errors[task.name]    = err
+                self._end_times[task.name] = time.time()
             self._set_status(task.name, TaskStatus.FAILED)
             self._emit(ProgressEvent(
                 task_name=task.name, current=0, total=1,
@@ -387,6 +410,7 @@ class PipelineSnapshot:
     progress:         dict[str, float]
     messages:         dict[str, str]
     errors:           dict[str, str]
+    elapsed:          dict[str, float]    # seconds per task
     overall_fraction: float
     is_running:       bool
     is_cancelled:     bool
