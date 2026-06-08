@@ -490,12 +490,15 @@ def _run_analysis_task(
     # Summary plot
     summary_plot(results, calib, total_activity, peaks, frame_indices, fps_raw, plot_out)
 
-    # Annotated video
+    # Annotated video — non-fatal: encoding failure does not fail the task
     if results and not (cancel_event and cancel_event.is_set()):
         if progress_callback:
             progress_callback(len(peaks), len(peaks), "Rendering annotated video...")
-        render_annotated_video(results, calib, video_path, vid_out,
-                               seg, dye_track, fps_raw, stride)
+        try:
+            render_annotated_video(results, calib, video_path, vid_out,
+                                   seg, dye_track, fps_raw, stride)
+        except Exception as _vid_err:
+            print(f"[warn] Annotated video rendering failed (results still saved): {_vid_err}")
 
     if progress_callback:
         progress_callback(len(peaks), len(peaks), "Analysis complete")

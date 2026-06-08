@@ -549,13 +549,33 @@ def spacetime_plot(
 # ── Annotated video ───────────────────────────────────────────────────────────
 
 def _probe_nvenc() -> bool:
-    """Return True if ffmpeg with h264_nvenc is available on this machine."""
+    """
+    Return True only if ffmpeg h264_nvenc actually encodes a test frame.
+    Listing the encoder is not enough — NVENC can be listed but fail on init.
+    """
     try:
-        r = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-encoders"],
-            capture_output=True, text=True, timeout=5,
-        )
-        return "h264_nvenc" in r.stdout
+        import tempfile, os
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as f:
+            tmp = f.name
+        try:
+            r = subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "rawvideo", "-vcodec", "rawvideo",
+                    "-s", "16x16", "-pix_fmt", "bgr24", "-r", "1",
+                    "-i", "pipe:0",
+                    "-c:v", "h264_nvenc", "-preset", "p4",
+                    "-pix_fmt", "yuv420p", tmp,
+                ],
+                input=bytes(16 * 16 * 3),
+                timeout=10, capture_output=True,
+            )
+            return r.returncode == 0
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
     except Exception:
         return False
 
@@ -573,15 +593,33 @@ class _FFmpegWriter:
             str(path),
         ]
         self._proc = subprocess.Popen(
-            cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+            cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE
         )
+        self._ok = True
 
-    def write(self, frame) -> None:
-        self._proc.stdin.write(frame.tobytes())
+    def write(self, frame) -> bool:
+        """Write one frame. Returns False and marks writer failed on broken pipe."""
+        if not self._ok:
+            return False
+        try:
+            self._proc.stdin.write(frame.tobytes())
+            return True
+        except BrokenPipeError:
+            self._ok = False
+            return False
 
-    def release(self) -> None:
-        self._proc.stdin.close()
-        self._proc.wait()
+    def release(self) -> bool:
+        """Flush and wait. Returns True if encoding succeeded."""
+        try:
+            if self._ok:
+                self._proc.stdin.close()
+            self._proc.wait(timeout=30)
+        except Exception:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+        return self._ok and self._proc.returncode == 0
 
 
 def _open_writer(path: Path, fps: float, w: int, h: int):
@@ -593,6 +631,7 @@ def _open_writer(path: Path, fps: float, w: int, h: int):
             return writer
         except Exception:
             pass
+    print("  [video] using cv2 mp4v encoder")
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     return cv2.VideoWriter(str(path), fourcc, fps, (w, h))
 
