@@ -96,6 +96,24 @@ angle
 
 ---
 
+## Recommended configuration
+
+Based on validation testing, the following settings give the best accuracy:
+
+| Setting | Value | Notes |
+| --- | --- | --- |
+| SAM2 stride | **1** | Process every frame for accurate contour radii |
+| CoTracker stride | **4** | Track dye every 4th frame (30 fps effective at 120 fps) |
+| SAM2 model | `tiny` | Fastest; no measurable accuracy loss on Cassiopea's high-contrast bell |
+| Inner frac | 0.75 | Inner edge of margin ring |
+| Outer frac | 1.05 | Extends slightly past bell edge to capture outward expansion |
+
+> **Speed vs accuracy trade-off:** stride=1 SAM2 is ~4× slower than stride=4 but eliminates
+> interpolation artifacts in the contour radii that can distort initiation angle estimates.
+> For exploratory runs use stride=4; for publication-quality results use stride=1.
+
+---
+
 ## Requirements
 
 ### Hardware
@@ -121,6 +139,7 @@ angle
 ## Installation
 
 All commands are run in **PowerShell** from the project folder.
+See [INSTALLATION.md](INSTALLATION.md) for full instructions including cross-platform setup.
 
 ### 1. Clone the repository
 
@@ -140,7 +159,7 @@ Creates a virtual environment, installs all packages, downloads model weights, a
 runs a GPU smoke test. After it finishes you should see:
 
 ```text
-All checks passed. Environment is ready.
+Setup complete.
 ```
 
 ### 3. Configure your video folder
@@ -153,39 +172,63 @@ VIDEO_DIR = Path(r"C:\Users\YourName\Videos\Cassiopea")
 
 ---
 
-## Running the pipeline
+## Graphical interface (UI)
+
+A napari-based desktop application covers both calibration and video processing without the command line.
+
+```powershell
+.\venv\Scripts\python scripts\run_ui.py
+```
+
+The window has two tabs:
+
+| Tab | Purpose |
+|-----|---------|
+| **Calibrate** | One-time annotation of rhopalia positions from a still photo |
+| **Process** | Run the full analysis pipeline on a video |
+
+See [UI_GUIDE.md](UI_GUIDE.md) for step-by-step instructions.
+
+---
+
+## Running the pipeline (CLI)
 
 ### Option A — One command (recommended)
 
 `run_pipeline.py` runs all stages automatically with the optimal parallel schedule
-for your GPU. SAM2 and CoTracker start simultaneously on GPUs with ≥ 20 GB VRAM;
-Approach B Phase 1 overlaps with CoTracker on all hardware.
+for your GPU.
 
 ```powershell
-.\venv\Scripts\python.exe scripts\run_pipeline.py --video data\test_clip.mp4
+# Recommended (best accuracy):
+.\venv\Scripts\python.exe scripts\run_pipeline.py --video data\test_clip.mp4 --stride 1 --cotracker-stride 4
+
+# Faster exploratory run:
+.\venv\Scripts\python.exe scripts\run_pipeline.py --video data\test_clip.mp4 --stride 4 --cotracker-stride 4
 ```
 
 The script opens two click windows in sequence — one for the bell, one for the dye
-mark — then runs everything unattended. Outputs land in
-`outputs\<video_stem>\`.
+mark — then runs everything unattended. Outputs land in `outputs\<video_stem>\`.
 
 **Key options:**
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--stride` | 4 | Frame subsampling (4 = 30 fps from 120 fps). Higher = faster, less temporal resolution. |
-| `--sam2-model` | base | SAM2 variant: `tiny`, `small`, `base`, `large` (see model comparison below) |
+| `--stride` | 4 | SAM2 frame subsampling (1 = every frame; 4 = 30fps from 120fps) |
+| `--cotracker-stride` | 4 | CoTracker frame interval (recommend matching `--stride`) |
+| `--sam2-model` | `tiny` | SAM2 variant: `tiny`, `small`, `base_plus`, `large` |
 | `--calib` | auto | Path to calibration JSON (auto-detected from `calibration/`) |
+| `--inner-frac` | 0.75 | Inner edge of polar ring (fraction of bell radius) |
+| `--outer-frac` | 1.05 | Outer edge — values > 1.0 capture outside-bell expansion signal |
+| `--prominence` | 0.08 | Peak detection threshold (fraction of signal range) |
 
 **Checkpoint / resume:** if the run is interrupted, restarting the same command
-skips stages whose outputs already exist.
+skips stages whose outputs already exist. Pass `--recompute` to force all stages to re-run.
 
 ---
 
 ### Option B — Individual scripts (standalone / debugging)
 
-Each stage can be run independently if you need to re-run one step without
-repeating the others.
+Each stage can be run independently.
 
 #### Prepare a test clip
 
@@ -194,32 +237,7 @@ repeating the others.
     -ss 00:00:00 -t 60 -c copy data\test_clip.mp4
 ```
 
-#### Step 1 — Segment the bell (SAM2)
-
-```powershell
-.\venv\Scripts\python.exe scripts\run_sam2.py --video data\test_clip.mp4 --stride 4
-```
-
-Click anywhere on the bell body, press ENTER.
-
-#### Step 2 — Track the dye mark (CoTracker)
-
-```powershell
-.\venv\Scripts\python.exe scripts\cotracker_test.py --video data\test_clip.mp4 --stride 4
-```
-
-Click the dye mark, press ENTER.
-
-#### Step 3 — Validate tracking
-
-```powershell
-.\venv\Scripts\python.exe scripts\validate_tracking.py
-```
-
-Generates `outputs\<stem>\<stem>_annotated.mp4`. The red dot should stay on the
-bell centre; the green dot should follow the dye mark throughout.
-
-#### Step 4 — Calibrate rhopalium positions (one-time per animal)
+#### Step 1 — Calibrate rhopalium positions (one-time per animal)
 
 Take a high-resolution still photo of the jellyfish with the dye mark visible.
 
@@ -235,49 +253,43 @@ BACKSPACE to undo, ENTER when done.
 - `calibration\photo_name.json` — permanent rhopalium body-frame angle record
 - `calibration\photo_name_annotated.png` — labelled verification diagram
 
-#### Step 5 — Pulse initiation analysis (Approach B)
+#### Step 2 — Segment the bell (SAM2)
+
+```powershell
+.\venv\Scripts\python.exe scripts\run_sam2.py --video data\test_clip.mp4 --stride 1
+```
+
+Click anywhere on the bell body, press ENTER.
+
+#### Step 3 — Track the dye mark (CoTracker)
+
+```powershell
+.\venv\Scripts\python.exe scripts\cotracker_test.py --video data\test_clip.mp4 --stride 4
+```
+
+Click the dye mark, press ENTER.
+
+#### Step 4 — Pulse initiation analysis (Approach B)
 
 ```powershell
 .\venv\Scripts\python.exe scripts\run_approach_b.py
 ```
 
-Phase 1 computes `_margin_diff_lab.npy` (lab-frame, streams from video — no JPEG
-extraction needed) then `_margin_diff.npy` (body-frame, requires CoTracker output).
-Phase 1 is cached and reused on re-runs unless `--recompute` is passed.
-
-**Tunable parameters:**
-
-| Parameter | Default | Effect |
-| --- | --- | --- |
-| `--inner-frac` | 0.75 | Inner edge of margin ring (fraction of bell radius) |
-| `--outer-frac` | 1.05 | Outer edge — values > 1.0 include outside-bell expansion signal |
-| `--pre-window` | 30 | Frames before peak to scan for initiation |
-| `--min-distance` | 0.42 s | Minimum time between pulses |
-| `--prominence` | 0.05 | Peak detection threshold (fraction of signal range) |
-| `--recompute` | off | Force recompute margin_diff (needed when changing inner/outer-frac) |
+Phase 1 computes `_margin_diff_lab.npy` (lab-frame) then `_margin_diff.npy`
+(body-frame). Both are cached and reused on re-runs.
 
 ---
 
 ## SAM2 model selection
 
-Four model sizes are available. The `tiny` model is recommended for most
-recordings — it is ~2× faster than `base` with no measurable quality difference
-on the high-contrast Cassiopea bell:
+Four model sizes are available. `tiny` is recommended:
 
-| Model | Weights | Speed (RTX 4060) | Use when |
+| Model | Weights | Speed (RTX 4060, stride=1) | Use when |
 | --- | --- | --- | --- |
-| `tiny` | 148 MB | ~8.5 fps | **Recommended default** |
-| `small` | 185 MB | ~6 fps | Marginal accuracy improvement |
-| `base` | 308 MB | ~5.6 fps | If tiny shows mask drift |
-| `large` | ~900 MB | ~2–3 fps | Maximum accuracy, long recordings |
-
-Select with `--sam2-model tiny` (or set as default in
-[config.py](config.py)):
-
-```python
-SAM2_WEIGHTS = WEIGHTS_DIR / "sam2" / "sam2.1_hiera_tiny.pt"
-SAM2_CONFIG  = "configs/sam2.1/sam2.1_hiera_t.yaml"
-```
+| `tiny` | 148 MB | ~3.5 fps | **Recommended default** |
+| `small` | 185 MB | ~2.5 fps | Marginal accuracy improvement |
+| `base_plus` | 308 MB | ~2.2 fps | If tiny shows mask drift |
+| `large` | ~900 MB | ~0.8–1 fps | Maximum accuracy, short recordings only |
 
 ---
 
@@ -285,17 +297,17 @@ SAM2_CONFIG  = "configs/sam2.1/sam2.1_hiera_t.yaml"
 
 ### Processing time estimates
 
-For a **10-minute recording at 120 fps**, stride = 4 (30 fps effective):
+For a **10-minute recording at 120 fps** on an RTX 4060:
 
-| Hardware | SAM2 tiny | CoTracker | Approach B | Total |
+| Configuration | SAM2 | CoTracker | Approach B | Total |
 | --- | --- | --- | --- | --- |
-| RTX 4060 laptop (sequential) | ~45 min | ~110 min | ~5 min | **~2.5–3 hrs** |
-| RTX 4090 desktop (parallel) | ~15 min | ~25 min | ~3 min | **~30–40 min** |
+| stride=1 SAM2, stride=4 CT *(recommended)* | ~120 min | ~28 min | ~5 min | **~2.5 hrs** |
+| stride=4 SAM2, stride=4 CT *(fast)* | ~30 min | ~28 min | ~5 min | **~1 hr** |
+| stride=4 SAM2, stride=8 CT *(legacy default)* | ~30 min | ~110 min | ~5 min | **~2.5 hrs** |
 
 ### Active performance optimisations
 
-- **bfloat16 inference** — CoTracker runs in mixed precision, using the GPU's tensor
-  cores (~1.5–2× faster than float32)
+- **bfloat16 inference** — CoTracker runs in mixed precision (~1.5–2× faster than float32)
 - **`torch.compile`** — both CoTracker and the SAM2 image encoder are JIT-compiled on
   the first run; subsequent chunks benefit from fused kernels (~15–25% faster)
 - **Parallel task scheduler** — `src/scheduler.py` runs SAM2, CoTracker, and
@@ -307,11 +319,11 @@ For a **10-minute recording at 120 fps**, stride = 4 (30 fps effective):
 
 ### Stride guidelines
 
-| Stride | Effective fps | Processing time | Temporal resolution |
-| --- | --- | --- | --- |
-| 1 | 120 fps | ~15 hrs (10 min clip, RTX 4060) | Maximum |
-| 4 | 30 fps | ~2.5–3 hrs | Recommended — pulses are ~1 s long |
-| 8 | 15 fps | ~1.5 hrs | Faster; marginal accuracy tradeoff |
+| Stride | Effective fps (at 120 fps) | Accuracy |
+| --- | --- | --- |
+| 1 | 120 fps | Maximum — **recommended for analysis** |
+| 4 | 30 fps | Good for exploration; slight interpolation artifacts |
+| 8 | 15 fps | Fast; noticeable accuracy loss on initiation angles |
 
 ---
 
@@ -352,6 +364,7 @@ outputs\
       ...
     <stem>_annotated.mp4         Validation video (dye + centroid overlay)
     <stem>_sam2_validation.png   SAM2 segmentation spot-check
+    <stem>_run_log.json          Config and timing for every run (appends)
 
 calibration\
   <animal>.json                  Rhopalium body-frame angles  (permanent record)
@@ -364,12 +377,14 @@ calibration\
 
 ```text
 src\
-  resources.py     GPU detection, GpuGate semaphore
-  scheduler.py     DAG task runner with parallel execution and UI-ready callbacks
-  tasks.py         Task factory functions wrapping each pipeline stage
-  pipeline.py      run_pipeline() — assembles and executes the full pipeline
+  calibration_core.py  Shared calibration math (body_angle, build_calibration, etc.)
+  resources.py         GPU detection, GpuGate semaphore
+  scheduler.py         DAG task runner with parallel execution and UI-ready callbacks
+  tasks.py             Task factory functions wrapping each pipeline stage
+  pipeline.py          run_pipeline() — assembles and executes the full pipeline
 
 scripts\
+  run_ui.py             Launch the napari graphical interface
   run_pipeline.py       Full pipeline CLI (primary entry point)
   run_sam2.py           SAM2 bell segmentation (standalone)
   cotracker_test.py     CoTracker dye tracking (standalone)
@@ -377,10 +392,20 @@ scripts\
   calibrate_rhopalia.py One-time rhopalium calibration from hi-res photo
   validate_tracking.py  Side-by-side validation video generator
 
-calibration\            Rhopalium calibration files (tracked in git)
-data\                   Short test clips (gitignored)
-outputs\                All pipeline outputs (gitignored)
-weights\                Model weights (gitignored)
+ui\
+  app.py           napari viewer setup and dock widget
+  widget.py        Two-tab container (CalibrationTab + ProcessingTab)
+  calibration.py   Calibration workflow UI
+  processing.py    Video processing workflow UI
+  workers.py       Background thread worker and progress relay
+  parameters.py    PipelineParams dataclass
+  thumbnails.py    Video thumbnail cache helper
+
+calibration\      Rhopalium calibration files (tracked in git)
+data\             Short test clips (gitignored)
+outputs\          All pipeline outputs (gitignored)
+weights\          Model weights (gitignored)
+docs\             LLM-accessible project knowledge (architecture, design decisions)
 ```
 
 ---

@@ -576,9 +576,10 @@ class ProcessingTab(QWidget):
                 import pandas as pd
                 df = pd.read_csv(result.track_csv)
                 # Tracks layer expects (id, t, y, x)
+                t_col = "frame_idx" if "frame_idx" in df.columns else df.columns[0]
                 track_data = np.column_stack([
                     np.zeros(len(df), dtype=int),
-                    df["frame"].values,
+                    df[t_col].values,
                     df["y"].values,
                     df["x"].values,
                 ])
