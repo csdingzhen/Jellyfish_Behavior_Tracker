@@ -414,6 +414,8 @@ class ProcessingTab(QWidget):
 
         self._log("SAM2 preview: running segmentation on frame 0…")
 
+        from napari.qt.threading import thread_worker
+
         @thread_worker
         def _preview_worker():
             import torch
@@ -651,15 +653,4 @@ class ProcessingTab(QWidget):
         self.log_area.append(msg)
 
 
-# deferred import so napari.qt.threading is only imported after napari is ready
-def _thread_worker_import():
-    from napari.qt.threading import thread_worker
-    return thread_worker
-
-
-# patch reference used inside _run_sam2_preview
 import numpy as np
-try:
-    from napari.qt.threading import thread_worker
-except ImportError:
-    thread_worker = None

@@ -1,0 +1,44 @@
+<svg width="512" height="512" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img">
+  <title>Cassiopea Behavior Analysis</title>
+  <desc>Top-down view of a stylized Cassiopea jellyfish bell with 16 rhopalia and a dye mark.</desc>
+
+  <defs>
+    <radialGradient id="bellFill" cx="50%" cy="42%" r="55%">
+      <stop offset="0%" stop-color="#A4E0E8"/>
+      <stop offset="55%" stop-color="#5FBFD0"/>
+      <stop offset="100%" stop-color="#2B7B8E"/>
+    </radialGradient>
+    <clipPath id="bellClip">
+      <circle cx="128" cy="128" r="92"/>
+    </clipPath>
+  </defs>
+
+  <circle cx="128" cy="128" r="100" fill="#1A3D4A" opacity="0.12"/>
+  <circle cx="128" cy="128" r="92" fill="url(#bellFill)"/>
+
+  <g opacity="0.25" clip-path="url(#bellClip)" fill="none" stroke="#1A3D4A" stroke-width="1.5">
+    <circle cx="128" cy="128" r="68"/>
+    <circle cx="128" cy="128" r="44"/>
+    <circle cx="128" cy="128" r="22"/>
+  </g>
+
+  <g fill="#1A3D4A">
+    <circle cx="220" cy="128" r="6.5"/>
+    <circle cx="213.0" cy="163.2" r="6.5"/>
+    <circle cx="193.0" cy="193.0" r="6.5"/>
+    <circle cx="163.2" cy="213.0" r="6.5"/>
+    <circle cx="128" cy="220" r="6.5"/>
+    <circle cx="92.8" cy="213.0" r="6.5"/>
+    <circle cx="63.0" cy="193.0" r="6.5"/>
+    <circle cx="42.7" cy="163.2" r="6.5"/>
+    <circle cx="36" cy="128" r="6.5"/>
+    <circle cx="42.7" cy="92.8" r="6.5"/>
+    <circle cx="63.0" cy="63.0" r="6.5"/>
+    <circle cx="92.8" cy="42.7" r="6.5"/>
+    <circle cx="163.2" cy="42.7" r="6.5"/>
+    <circle cx="193.0" cy="63.0" r="6.5"/>
+    <circle cx="213.0" cy="92.8" r="6.5"/>
+  </g>
+
+  <circle cx="128" cy="36" r="9" fill="#F5A06D" stroke="#FFFFFF" stroke-width="2"/>
+</svg>

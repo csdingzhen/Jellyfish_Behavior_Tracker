@@ -11,6 +11,16 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+_ICON = Path(__file__).parent.parent / "assets" / "app_icon.svg"
+
+# Windows: set the App User Model ID before QApplication is created so the
+# taskbar groups this process under our own icon rather than Python's.
+if sys.platform == "win32":
+    import ctypes
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+        "Jellyfish.Cassiopea.1"
+    )
+
 
 def _simplify_viewer(viewer) -> None:
     """Hide the photoshop-like layer controls and layer list panels."""
@@ -24,12 +34,35 @@ def _simplify_viewer(viewer) -> None:
         pass  # graceful fallback if napari internals change
 
 
+def _make_icon(svg_path: Path):
+    """Rasterize SVG → multi-resolution QIcon (needed for Windows taskbar)."""
+    from qtpy.QtCore import Qt
+    from qtpy.QtGui import QIcon, QPixmap, QPainter
+    from qtpy.QtSvg import QSvgRenderer
+    renderer = QSvgRenderer(str(svg_path))
+    icon = QIcon()
+    for size in (16, 32, 48, 64, 128, 256):
+        px = QPixmap(size, size)
+        px.fill(Qt.transparent)
+        p = QPainter(px)
+        renderer.render(p)
+        p.end()
+        icon.addPixmap(px)
+    return icon
+
+
 def main():
     import napari
+    from qtpy.QtWidgets import QApplication
     from .widget import CassiopeaWidget
 
     viewer = napari.Viewer(title="Cassiopea Pipeline")
     _simplify_viewer(viewer)
+
+    if _ICON.exists():
+        icon = _make_icon(_ICON)
+        QApplication.instance().setWindowIcon(icon)
+        viewer.window._qt_window.setWindowIcon(icon)
 
     widget = CassiopeaWidget(viewer)
     viewer.window.add_dock_widget(
