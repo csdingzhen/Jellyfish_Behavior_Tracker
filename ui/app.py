@@ -55,6 +55,7 @@ def main():
     import napari
     from qtpy.QtWidgets import QApplication
     from .widget import CassiopeaWidget
+    from .sidebar import VideoSidebarWidget
 
     viewer = napari.Viewer(title="Cassiopea Pipeline")
     _simplify_viewer(viewer)
@@ -64,6 +65,7 @@ def main():
         QApplication.instance().setWindowIcon(icon)
         viewer.window._qt_window.setWindowIcon(icon)
 
+    # Right dock — main workflow tabs
     widget = CassiopeaWidget(viewer)
     viewer.window.add_dock_widget(
         widget,
@@ -71,6 +73,27 @@ def main():
         area="right",
         allowed_areas=["right", "left"],
     )
+
+    # Left dock — video browser sidebar
+    sidebar = VideoSidebarWidget()
+    viewer.window.add_dock_widget(
+        sidebar,
+        name="Videos",
+        area="left",
+        allowed_areas=["left", "right"],
+    )
+
+    # Connect sidebar → process tab
+    sidebar.video_selected.connect(widget.on_video_selected)
+
+    # Connect project bar → sidebar (auto-load folder when project opens/creates)
+    def _on_project_for_sidebar(state):
+        if state.video_folder:
+            from pathlib import Path
+            sidebar.load_folder(Path(state.video_folder))
+
+    widget.project_bar.project_changed.connect(_on_project_for_sidebar)
+
     napari.run()
 
 

@@ -7,6 +7,8 @@ Tabs are constructed lazily on first activation to keep startup fast.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from qtpy.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -15,15 +17,14 @@ from qtpy.QtWidgets import (
 )
 from qtpy.QtCore import Qt
 
+from .project import ProjectBar
+
 
 class CassiopeaWidget(QWidget):
     """
-    Top-level dock widget with two tabs:
-      - Calibrate: one-time per-animal annotation of rhopalia positions
-      - Process:   video processing workflow
-
-    Each tab is constructed on first activation (lazy) so startup cost is
-    paid only for the tab the user actually opens first.
+    Top-level dock widget with:
+      - ProjectBar (New / Open / Save + project name label)
+      - Two lazy tabs: Calibrate and Process
     """
 
     def __init__(self, viewer, parent=None):
@@ -31,16 +32,23 @@ class CassiopeaWidget(QWidget):
         self.viewer = viewer
         self.calib_tab   = None
         self.process_tab = None
+        self._pending_video: Path | None = None
         self._build_ui()
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(4)
+
+        # Project bar at the very top
+        self.project_bar = ProjectBar()
+        self.project_bar.project_changed.connect(self._on_project_changed)
+        layout.addWidget(self.project_bar)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)
 
-        # Add lightweight placeholder widgets; real tabs built on first click.
+        # Placeholder widgets; real tabs built on first activation.
         self.tabs.addTab(_placeholder("Calibrate"), "Calibrate")
         self.tabs.addTab(_placeholder("Process"),   "Process")
 
@@ -62,6 +70,22 @@ class CassiopeaWidget(QWidget):
             self.tabs.removeTab(1)
             self.tabs.insertTab(1, self.process_tab, "Process")
             self.tabs.setCurrentIndex(1)
+            # Deliver any video that was selected before the tab existed
+            if self._pending_video is not None:
+                self.process_tab.load_video(self._pending_video)
+                self._pending_video = None
+
+    def on_video_selected(self, path: Path):
+        """Called by the VideoSidebarWidget when the user clicks a video."""
+        if self.process_tab is not None:
+            self.process_tab.load_video(path)
+        else:
+            self._pending_video = path
+
+    def _on_project_changed(self, state):
+        # Propagate to the sidebar (app.py wires this up via project_bar.project_changed)
+        if self.process_tab is not None:
+            self.process_tab.on_project_changed(state)
 
 
 def _placeholder(name: str) -> QWidget:

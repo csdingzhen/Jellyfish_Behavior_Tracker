@@ -44,3 +44,6 @@ weights/
 # Only exclude raw hi-res source images if they are large
 calibration/*.tiff
 calibration/*.tif
+
+# Project Record - New/Open/Save feature using JSON files
+project_folder/

@@ -2,6 +2,9 @@
 ui/processing.py
 
 Workflow B: video selection → annotation → pipeline run → results display.
+
+Video selection is handled by the VideoSidebarWidget in app.py; this tab
+receives the selected video via load_video(path).
 """
 
 from __future__ import annotations
@@ -19,25 +22,19 @@ from qtpy.QtWidgets import (
     QLabel,
     QComboBox,
     QFileDialog,
-    QListWidget,
-    QListWidgetItem,
     QGroupBox,
     QTextEdit,
     QProgressBar,
-    QSplitter,
     QMessageBox,
     QCheckBox,
-    QScrollArea,
-    QSizePolicy,
 )
-from qtpy.QtCore import Qt, QSize
+from qtpy.QtCore import Qt
 from qtpy.QtGui import QPixmap, QImage
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CALIB_DIR   = Path(__file__).parent.parent / "calibration"
-VIDEO_EXTS  = {".mp4", ".avi", ".mov", ".mkv"}
+CALIB_DIR = Path(__file__).parent.parent / "calibration"
 
 
 class ProcessingTab(QWidget):
@@ -45,21 +42,19 @@ class ProcessingTab(QWidget):
     Process tab.
 
     Steps:
-      1. Folder picker → video list with thumbnails
-      2. Select video → load first frame into viewer
-      3. Pick calibration JSON
-      4. Click bell (red) and dye (green) on first frame
+      1. Video loaded externally via load_video(path) from the sidebar
+      2. Pick calibration JSON
+      3. Click bell (red) and dye (green) on first frame
          → SAM2 mask preview shown immediately after bell click
-      5. Parameter panel
-      6. Run → progress display
-      7. Results loaded automatically on completion
+      4. Parameter panel
+      5. Run → progress display
+      6. Results loaded automatically on completion
     """
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
         self.viewer = viewer
 
-        self._video_dir:   Path | None  = None
         self._video_path:  Path | None  = None
         self._calib_path:  Path | None  = None
         self._bell_click:  tuple | None = None
@@ -68,10 +63,10 @@ class ProcessingTab(QWidget):
         self._worker = None
 
         # napari layer handles
-        self._frame_layer  = None
-        self._mask_layer   = None
-        self._bell_layer   = None
-        self._dye_layer    = None
+        self._frame_layer = None
+        self._mask_layer  = None
+        self._bell_layer  = None
+        self._dye_layer   = None
 
         self._build_ui()
 
@@ -81,25 +76,11 @@ class ProcessingTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(6)
 
-        # ── Folder + video list ───────────────────────────────────────────────
-        folder_box = QGroupBox("Video folder")
-        folder_layout = QVBoxLayout(folder_box)
-
-        folder_row = QHBoxLayout()
-        self.folder_label = QLabel("No folder selected")
-        self.folder_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        browse_folder_btn = QPushButton("Browse…")
-        browse_folder_btn.clicked.connect(self._browse_folder)
-        folder_row.addWidget(self.folder_label)
-        folder_row.addWidget(browse_folder_btn)
-        folder_layout.addLayout(folder_row)
-
-        self.video_list = QListWidget()
-        self.video_list.setIconSize(QSize(120, 90))
-        self.video_list.setMaximumHeight(200)
-        self.video_list.currentItemChanged.connect(self._on_video_selected)
-        folder_layout.addWidget(self.video_list)
-        layout.addWidget(folder_box)
+        # ── Current video label ───────────────────────────────────────────────
+        self._video_label = QLabel("No video selected")
+        self._video_label.setStyleSheet("color: #aaa; font-style: italic;")
+        self._video_label.setWordWrap(True)
+        layout.addWidget(self._video_label)
 
         # ── Calibration picker ────────────────────────────────────────────────
         calib_box = QGroupBox("Calibration")
@@ -145,20 +126,38 @@ class ProcessingTab(QWidget):
         self._build_param_panel(param_layout)
         layout.addWidget(param_box)
 
-        # ── Run button + recompute ────────────────────────────────────────────
-        run_row = QHBoxLayout()
-        self.force_recompute_cb = QCheckBox("Force recompute")
-        self.force_recompute_cb.setToolTip(
-            "Delete cached outputs and rerun all pipeline stages from scratch."
+        # ── Per-task recompute + Run ──────────────────────────────────────────
+        recompute_box = QGroupBox("Recompute (force re-run)")
+        recompute_layout = QHBoxLayout(recompute_box)
+        self.rerun_sam2_cb = QCheckBox("SAM2")
+        self.rerun_sam2_cb.setToolTip(
+            "Re-run SAM2 segmentation even if cached outputs exist.\n"
+            "Deletes existing mask / contour-radii cache."
         )
+        self.rerun_cotrack_cb = QCheckBox("CoTracker")
+        self.rerun_cotrack_cb.setToolTip(
+            "Re-run CoTracker dye-point tracking even if a cached track CSV exists."
+        )
+        self.rerun_analysis_cb = QCheckBox("Analysis")
+        self.rerun_analysis_cb.setToolTip(
+            "Re-run margin diff, body-frame rotation and pulse initiation analysis\n"
+            "even if cached analysis outputs exist."
+        )
+        recompute_layout.addWidget(self.rerun_sam2_cb)
+        recompute_layout.addWidget(self.rerun_cotrack_cb)
+        recompute_layout.addWidget(self.rerun_analysis_cb)
+        recompute_layout.addStretch()
+        layout.addWidget(recompute_box)
+
+        run_row = QHBoxLayout()
         self.run_btn = QPushButton("Run pipeline")
-        self.run_btn.setStyleSheet("background: #224488; font-weight: bold; padding: 6px;")
+        self.run_btn.setStyleSheet(
+            "background: #224488; font-weight: bold; padding: 6px;"
+        )
         self.run_btn.clicked.connect(self._on_run)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.clicked.connect(self._on_cancel)
-        run_row.addWidget(self.force_recompute_cb)
-        run_row.addStretch()
         run_row.addWidget(self.run_btn)
         run_row.addWidget(self.cancel_btn)
         layout.addLayout(run_row)
@@ -174,8 +173,8 @@ class ProcessingTab(QWidget):
             "Body-frame rotation",
             "Pulse initiation analysis",
         ]
-        self._progress_bars: dict[str, QProgressBar] = {}
-        self._progress_labels: dict[str, QLabel] = {}
+        self._progress_bars:   dict[str, QProgressBar] = {}
+        self._progress_labels: dict[str, QLabel]       = {}
         for name in TASK_NAMES:
             row = QHBoxLayout()
             lbl = QLabel(name[:28])
@@ -221,34 +220,81 @@ class ProcessingTab(QWidget):
 
     def _build_param_panel(self, parent_layout):
         """Simple form built from PipelineParams dataclass fields."""
-        from magicgui.widgets import Container, SpinBox, FloatSpinBox, CheckBox, ComboBox
+        from magicgui.widgets import Container, SpinBox, FloatSpinBox, ComboBox
         from .parameters import PipelineParams, Sam2Model
 
         self._params = PipelineParams()
 
-        def _spin(label, attr, lo, hi, step=1):
+        def _spin(label, attr, lo, hi, step=1, tooltip=""):
             w = SpinBox(label=label, value=getattr(self._params, attr),
-                        min=lo, max=hi, step=step)
+                        min=lo, max=hi, step=step, tooltip=tooltip)
             w.changed.connect(lambda v: setattr(self._params, attr, v))
             return w
 
-        def _fspin(label, attr, lo, hi, step=0.01):
+        def _fspin(label, attr, lo, hi, step=0.01, tooltip=""):
             w = FloatSpinBox(label=label, value=getattr(self._params, attr),
-                             min=lo, max=hi, step=step)
+                             min=lo, max=hi, step=step, tooltip=tooltip)
             w.changed.connect(lambda v: setattr(self._params, attr, v))
             return w
 
-        stride_w      = _spin("SAM2 stride",       "stride",           1, 16)
-        ct_stride_w   = _spin("CoTracker stride",   "cotracker_stride", 1, 32)
-        pre_window_w  = _spin("Pre-window (frames)","pre_window",       5, 120)
-        inner_frac_w  = _fspin("Inner frac",        "inner_frac",       0.3, 1.0)
-        outer_frac_w  = _fspin("Outer frac",        "outer_frac",       0.8, 1.5)
-        prominence_w  = _fspin("Prominence",        "prominence",       0.01, 0.5, 0.01)
+        stride_w = _spin(
+            "SAM2 stride", "stride", 1, 16,
+            tooltip=(
+                "Process every Nth frame with SAM2 for mask propagation.\n"
+                "Lower = more accurate but slower. 4 is a good default for 120 fps.\n"
+                "Effective temporal resolution = stride / fps seconds."
+            ),
+        )
+        ct_stride_w = _spin(
+            "CoTracker stride", "cotracker_stride", 1, 32,
+            tooltip=(
+                "Temporal stride for CoTracker's sliding-window attention.\n"
+                "Larger = faster but may lose the dye point during fast motion.\n"
+                "Recommended: 8 for 120 fps recordings."
+            ),
+        )
+        pre_window_w = _spin(
+            "Pre-window (frames)", "pre_window", 5, 120,
+            tooltip=(
+                "Number of frames before each detected pulse peak to include\n"
+                "in the initiation analysis window. Should cover at least one\n"
+                "full contraction wavefront propagation (~10–30 frames at 120 fps)."
+            ),
+        )
+        inner_frac_w = _fspin(
+            "Inner frac", "inner_frac", 0.3, 1.0,
+            tooltip=(
+                "Inner radius of the annular margin band as a fraction of the\n"
+                "bell radius. 0.75 means the band starts 75% of the way out.\n"
+                "Keep well inside the true bell margin to avoid petri-dish noise."
+            ),
+        )
+        outer_frac_w = _fspin(
+            "Outer frac", "outer_frac", 0.8, 1.5,
+            tooltip=(
+                "Outer radius of the annular margin band as a fraction of the\n"
+                "bell radius. 1.05 slightly overshoots the mask edge to capture\n"
+                "the full marginal lappet region."
+            ),
+        )
+        prominence_w = _fspin(
+            "Prominence", "prominence", 0.01, 0.5, step=0.01,
+            tooltip=(
+                "Minimum peak prominence (relative to signal range) for a\n"
+                "divergence peak to be counted as a pulse. Raise this to suppress\n"
+                "spurious detections; lower it to catch weak pulses."
+            ),
+        )
 
         sam2_model_w = ComboBox(
             label="SAM2 model",
             choices=[e.value for e in Sam2Model],
             value=self._params.sam2_model.value,
+            tooltip=(
+                "SAM2 backbone size. 'tiny' runs fastest and fits in 8 GB VRAM;\n"
+                "'large' is more accurate but needs more memory and time.\n"
+                "For Cassiopea's high-contrast bell, 'tiny' is usually sufficient."
+            ),
         )
         sam2_model_w.changed.connect(
             lambda v: setattr(self._params, "sam2_model", Sam2Model(v))
@@ -260,63 +306,20 @@ class ProcessingTab(QWidget):
         ])
         parent_layout.addWidget(container.native)
 
-    # ── Folder / video loading ────────────────────────────────────────────────
+    # ── Public API ────────────────────────────────────────────────────────────
 
-    def _browse_folder(self):
-        from config import VIDEO_DIR
-        start = str(self._video_dir or VIDEO_DIR)
-        folder = QFileDialog.getExistingDirectory(self, "Select video folder", start)
-        if folder:
-            self._load_folder(Path(folder))
-
-    def _load_folder(self, folder: Path):
-        self._video_dir = folder
-        self.folder_label.setText(str(folder))
-        self.video_list.clear()
-
-        videos = sorted(
-            p for p in folder.iterdir()
-            if p.suffix.lower() in VIDEO_EXTS
-        )
-        for vp in videos:
-            item = QListWidgetItem(vp.name)
-            item.setData(Qt.UserRole, vp)
-            # Load thumbnail asynchronously (simple: load in place for MVP)
-            thumb = self._load_thumb(vp)
-            if thumb is not None:
-                item.setIcon(self._numpy_to_icon(thumb))
-            self.video_list.addItem(item)
-
-    def _load_thumb(self, video_path: Path):
-        from .thumbnails import get_thumbnail
-        try:
-            return get_thumbnail(video_path)
-        except Exception:
-            return None
-
-    def _numpy_to_icon(self, rgb: np.ndarray):
-        from qtpy.QtGui import QImage, QPixmap, QIcon
-        h, w, c = rgb.shape
-        qi = QImage(rgb.data, w, h, w * c, QImage.Format_RGB888)
-        return QIcon(QPixmap.fromImage(qi))
-
-    def _on_video_selected(self, current, previous):
-        if current is None:
-            return
-        vp: Path = current.data(Qt.UserRole)
-        self._load_video_first_frame(vp)
-
-    def _load_video_first_frame(self, video_path: Path):
+    def load_video(self, path: Path):
+        """Load *path* into the viewer as the current working video."""
         from .thumbnails import read_first_frame
-        frame = read_first_frame(video_path)
+        frame = read_first_frame(path)
         if frame is None:
-            QMessageBox.warning(self, "Error", f"Cannot read:\n{video_path}")
+            QMessageBox.warning(self, "Error", f"Cannot read:\n{path}")
             return
 
-        self._video_path = video_path
+        self._video_path = path
+        self._video_label.setText(path.name)
+        self._video_label.setStyleSheet("color: #dddddd;")
 
-        # Clear ALL viewer layers — removes the high-res calibration image from
-        # the Calibrate tab and any previous video frame.
         self.viewer.layers.clear()
         self._frame_layer = None
         self._mask_layer  = None
@@ -324,12 +327,23 @@ class ProcessingTab(QWidget):
         self._dye_layer   = None
 
         self._frame_layer = self.viewer.add_image(
-            frame, name=video_path.name, rgb=True
+            frame, name=path.name, rgb=True
         )
         self._bell_click = None
         self._dye_click  = None
         self.bell_coord_label.setText("—")
         self.dye_coord_label.setText("—")
+
+    def on_project_changed(self, state) -> None:
+        """Called when the active project changes (from ProjectBar)."""
+        # Auto-select calibration from the project
+        if state.calibration:
+            calib_path = Path(state.calibration)
+            for i in range(self.calib_combo.count()):
+                item_path = self.calib_combo.itemData(i)
+                if isinstance(item_path, Path) and item_path == calib_path:
+                    self.calib_combo.setCurrentIndex(i)
+                    break
 
     # ── Calibration picker ────────────────────────────────────────────────────
 
@@ -370,11 +384,12 @@ class ProcessingTab(QWidget):
             return
         row, col = data[-1]
         self._bell_click = (int(col), int(row))
-        self.bell_coord_label.setText(f"x={self._bell_click[0]}  y={self._bell_click[1]}")
+        self.bell_coord_label.setText(
+            f"x={self._bell_click[0]}  y={self._bell_click[1]}"
+        )
         if len(data) > 1:
             self._bell_layer.data = data[[-1]]
         self._bell_layer.mode = "pan_zoom"
-        # Kick off SAM2 preview in background
         self._run_sam2_preview()
 
     def _start_dye_click(self):
@@ -397,7 +412,9 @@ class ProcessingTab(QWidget):
             return
         row, col = data[-1]
         self._dye_click = (int(col), int(row))
-        self.dye_coord_label.setText(f"x={self._dye_click[0]}  y={self._dye_click[1]}")
+        self.dye_coord_label.setText(
+            f"x={self._dye_click[0]}  y={self._dye_click[1]}"
+        )
         if len(data) > 1:
             self._dye_layer.data = data[[-1]]
         self._dye_layer.mode = "pan_zoom"
@@ -405,7 +422,6 @@ class ProcessingTab(QWidget):
     # ── SAM2 preview ──────────────────────────────────────────────────────────
 
     def _run_sam2_preview(self):
-        """Run SAM2 on frame 0 with the bell click and show a mask overlay."""
         if self._bell_click is None or self._video_path is None:
             return
 
@@ -433,7 +449,6 @@ class ProcessingTab(QWidget):
             sam2_model = build_sam2(SAM2_CONFIG, str(SAM2_WEIGHTS))
             with torch.inference_mode():
                 img_predictor = SAM2ImagePredictor(sam2_model)
-
                 frame_rgb = cv.cvtColor(frame_bgr, cv.COLOR_BGR2RGB)
                 img_predictor.set_image(frame_rgb)
                 masks, scores, _ = img_predictor.predict(
@@ -471,7 +486,7 @@ class ProcessingTab(QWidget):
 
     def _on_run(self):
         if self._video_path is None:
-            QMessageBox.warning(self, "No video", "Select a video first.")
+            QMessageBox.warning(self, "No video", "Select a video from the sidebar first.")
             return
         if self._bell_click is None:
             QMessageBox.warning(self, "No bell click",
@@ -486,13 +501,20 @@ class ProcessingTab(QWidget):
                                 "Select a calibration file, or run Workflow A first.")
             return
 
-        force = self.force_recompute_cb.isChecked()
-        if force:
+        rerun_sam2    = self.rerun_sam2_cb.isChecked()
+        rerun_cotrack = self.rerun_cotrack_cb.isChecked()
+        rerun_analysis = self.rerun_analysis_cb.isChecked()
+        any_rerun = rerun_sam2 or rerun_cotrack or rerun_analysis
+
+        if any_rerun:
+            parts = []
+            if rerun_sam2:    parts.append("SAM2")
+            if rerun_cotrack: parts.append("CoTracker")
+            if rerun_analysis: parts.append("Analysis")
             reply = QMessageBox.warning(
                 self, "Force recompute",
-                "This will DELETE all cached outputs for this video and rerun "
-                "every pipeline stage from scratch.\n\nThis can take several minutes.\n\n"
-                "Continue?",
+                f"This will DELETE cached outputs for: {', '.join(parts)}\n"
+                "and rerun those stages from scratch.\n\nContinue?",
                 QMessageBox.Yes | QMessageBox.Cancel,
             )
             if reply != QMessageBox.Yes:
@@ -505,13 +527,15 @@ class ProcessingTab(QWidget):
 
         from .workers import run_pipeline_worker
         self._worker = run_pipeline_worker(
-            video_path         = self._video_path,
-            bell_click         = self._bell_click,
-            dye_click          = self._dye_click,
-            calib_path         = self._calib_path,
-            params             = self._params,
-            cancel_event       = self._cancel_event,
-            delete_old_outputs = force,
+            video_path     = self._video_path,
+            bell_click     = self._bell_click,
+            dye_click      = self._dye_click,
+            calib_path     = self._calib_path,
+            params         = self._params,
+            cancel_event   = self._cancel_event,
+            rerun_sam2     = rerun_sam2,
+            rerun_cotrack  = rerun_cotrack,
+            rerun_analysis = rerun_analysis,
         )
         self._worker.yielded.connect(self._on_progress_event)
         self._worker.returned.connect(self._on_pipeline_done)
@@ -538,7 +562,6 @@ class ProcessingTab(QWidget):
         self.result_plot_label.clear()
 
     def _on_progress_event(self, event):
-        from src.scheduler import TaskStatus
         name = event.task_name
         if name in self._progress_bars:
             pct = int(event.fraction * 100)
@@ -551,7 +574,6 @@ class ProcessingTab(QWidget):
     def _on_pipeline_done(self, result):
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
-
         if result.success:
             self._log("Pipeline completed successfully.")
             self._load_results(result)
@@ -568,16 +590,13 @@ class ProcessingTab(QWidget):
     # ── Results display ───────────────────────────────────────────────────────
 
     def _load_results(self, result):
-        """Load output files into napari layers and the results panel."""
-        stem = self._video_path.stem
+        stem  = self._video_path.stem
         lines = ["Results loaded:"]
 
-        # Dye track
         if result.track_csv and result.track_csv.exists():
             try:
                 import pandas as pd
                 df = pd.read_csv(result.track_csv)
-                # Tracks layer expects (id, t, y, x)
                 t_col = "frame_idx" if "frame_idx" in df.columns else df.columns[0]
                 track_data = np.column_stack([
                     np.zeros(len(df), dtype=int),
@@ -590,7 +609,6 @@ class ProcessingTab(QWidget):
             except Exception as e:
                 self._log(f"Track CSV load error: {e}")
 
-        # Bell centroid points
         if result.seg_csv and result.seg_csv.exists():
             try:
                 import pandas as pd
@@ -604,18 +622,15 @@ class ProcessingTab(QWidget):
             except Exception as e:
                 self._log(f"Seg CSV load error: {e}")
 
-        # Initiation table
         if result.initiation_csv and result.initiation_csv.exists():
             try:
                 import pandas as pd
                 df = pd.read_csv(result.initiation_csv)
                 lines.append(f"  Initiation sites: {len(df)} pulses")
-                # Show first few rows in results label
                 lines.append(df.to_string(index=False, max_rows=8))
             except Exception as e:
                 self._log(f"Initiation CSV load error: {e}")
 
-        # Static plot PNG
         if result.initiation_plot and result.initiation_plot.exists():
             try:
                 pix = QPixmap(str(result.initiation_plot))
@@ -624,7 +639,6 @@ class ProcessingTab(QWidget):
             except Exception as e:
                 self._log(f"Plot load error: {e}")
 
-        # Annotated video — load as napari image stack
         if result.annotated_video and result.annotated_video.exists():
             try:
                 import cv2
@@ -637,10 +651,8 @@ class ProcessingTab(QWidget):
                     frames.append(cv2.cvtColor(f, cv2.COLOR_BGR2RGB))
                 cap.release()
                 if frames:
-                    stack = np.stack(frames)   # (T, H, W, 3)
-                    self.viewer.add_image(
-                        stack, name="Annotated video", rgb=True,
-                    )
+                    stack = np.stack(frames)
+                    self.viewer.add_image(stack, name="Annotated video", rgb=True)
                     lines.append(f"  Annotated video: {len(frames)} frames")
             except Exception as e:
                 self._log(f"Annotated video load error: {e}")
@@ -651,6 +663,3 @@ class ProcessingTab(QWidget):
 
     def _log(self, msg: str):
         self.log_area.append(msg)
-
-
-import numpy as np

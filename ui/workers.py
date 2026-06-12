@@ -56,13 +56,15 @@ class ProgressRelay:
 
 @thread_worker
 def run_pipeline_worker(
-    video_path:   Path,
-    bell_click:   tuple[int, int],
-    dye_click:    tuple[int, int],
-    calib_path:   Path,
-    params:       PipelineParams,
-    cancel_event: threading.Event,
-    delete_old_outputs: bool = False,
+    video_path:     Path,
+    bell_click:     tuple[int, int],
+    dye_click:      tuple[int, int],
+    calib_path:     Path,
+    params:         PipelineParams,
+    cancel_event:   threading.Event,
+    rerun_sam2:     bool = False,
+    rerun_cotrack:  bool = False,
+    rerun_analysis: bool = False,
 ):
     """
     Background worker that runs the full pipeline.
@@ -78,8 +80,13 @@ def run_pipeline_worker(
     """
     import time
 
-    if delete_old_outputs:
-        _delete_cached_outputs(video_path)
+    if rerun_sam2 or rerun_cotrack or rerun_analysis:
+        _delete_cached_outputs(
+            video_path,
+            rerun_sam2=rerun_sam2,
+            rerun_cotrack=rerun_cotrack,
+            rerun_analysis=rerun_analysis,
+        )
 
     relay = ProgressRelay()
 
@@ -116,23 +123,37 @@ def run_pipeline_worker(
     return result
 
 
-def _delete_cached_outputs(video_path: Path) -> None:
-    """Remove all cached outputs for this video so the pipeline reruns fully."""
-    from src.tasks import run_dir
+def _delete_cached_outputs(
+    video_path:     Path,
+    rerun_sam2:     bool = True,
+    rerun_cotrack:  bool = True,
+    rerun_analysis: bool = True,
+) -> None:
+    """Remove selected cached outputs so the chosen pipeline stages rerun."""
     from config import OUTPUTS_DIR
     rdir = OUTPUTS_DIR / video_path.stem
     if not rdir.exists():
         return
     stem = video_path.stem
-    # Delete the intermediate files the scheduler checks for skipping
-    extensions = [
-        "_seg.csv", "_contour_radii.npy",
-        "_track.csv",
-        "_margin_diff.npy",
-        "_initiation_b.csv", "_initiation_b_plot.png",
-        "_initiation_b_annotated.mp4",
+
+    sam2_files = [f"{stem}_seg.csv", f"{stem}_contour_radii.npy"]
+    cotrack_files = [f"{stem}_track.csv"]
+    analysis_files = [
+        f"{stem}_margin_diff.npy",
+        f"{stem}_initiation_b.csv",
+        f"{stem}_initiation_b_plot.png",
+        f"{stem}_initiation_b_annotated.mp4",
     ]
-    for ext in extensions:
-        p = rdir / f"{stem}{ext}"
+
+    to_delete: list[str] = []
+    if rerun_sam2:
+        to_delete += sam2_files
+    if rerun_cotrack:
+        to_delete += cotrack_files
+    if rerun_analysis:
+        to_delete += analysis_files
+
+    for fname in to_delete:
+        p = rdir / fname
         if p.exists():
             p.unlink()
