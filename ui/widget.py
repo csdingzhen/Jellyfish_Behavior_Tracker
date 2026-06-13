@@ -15,7 +15,7 @@ from qtpy.QtWidgets import (
     QTabWidget,
     QLabel,
 )
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, QTimer
 
 from .project import ProjectBar
 from .hardware import HardwareWidget
@@ -59,8 +59,9 @@ class CassiopeaWidget(QWidget):
         self.tabs.addTab(_placeholder("Process"),   "Process")
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        # Build the first tab immediately so it's ready without a click.
-        self._on_tab_changed(0)
+        # Defer first-tab build until after the event loop starts so the
+        # window appears before the heavy CalibrationTab imports run.
+        QTimer.singleShot(0, lambda: self._on_tab_changed(0))
 
     def _on_tab_changed(self, index: int):
         if index == 0 and self.calib_tab is None:

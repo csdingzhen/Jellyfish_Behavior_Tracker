@@ -3,23 +3,23 @@ ui/sidebar.py
 
 Left-panel video browser with:
   • Async thumbnail loading (up to 4 concurrent workers)
-  • Per-video status badges (recording / queued / processing / done / failed)
-  • Sequential auto-queue: completed videos are queued and processed one at a time
-  • FolderWatcher integration: new recordings are detected and auto-queued
-    when auto-queue mode is enabled
+  • Per-video status dots — always drawn on a clean copy of the thumbnail
+    so dots never accumulate when status changes
+  • Sequential auto-queue: completed recordings are queued and processed
+    one at a time (RTX 4060 cannot run two pipeline instances in parallel)
+  • FolderWatcher integration: new recordings auto-appear and, when
+    auto-queue is on, are added to the queue when writing finishes
 
 Signals
 -------
 video_selected(Path)  — user clicked a video (load into viewer)
-queue_start(Path)     — next video in queue is ready to process;
-                        app.py resolves bell/dye clicks and starts the worker
+queue_start(Path)     — app.py should start the pipeline for this video
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 from qtpy.QtCore import Qt, QRunnable, QThreadPool, QObject, Signal, QSize
 from qtpy.QtGui import QIcon, QPixmap, QImage, QColor, QPainter, QBrush
 from qtpy.QtWidgets import (
@@ -31,9 +31,9 @@ from qtpy.QtWidgets import (
 from .watcher import FolderWatcher, VideoStatus, VIDEO_EXTS
 
 THUMB_W, THUMB_H = 96, 72
-STATUS_DOT_SIZE  = 10   # px diameter of the status indicator dot
+DOT_R            = 10   # status dot diameter in pixels
 
-_STATUS_COLORS = {
+_STATUS_DOT = {
     VideoStatus.UNKNOWN:    "#555555",
     VideoStatus.RECORDING:  "#cc8833",
     VideoStatus.QUEUED:     "#cccc33",
@@ -43,13 +43,11 @@ _STATUS_COLORS = {
     VideoStatus.SKIPPED:    "#666666",
 }
 _STATUS_BG = {
-    VideoStatus.UNKNOWN:    None,
     VideoStatus.RECORDING:  "#2a1e00",
     VideoStatus.QUEUED:     "#2a2a00",
     VideoStatus.PROCESSING: "#001a2a",
     VideoStatus.DONE:       "#002a10",
     VideoStatus.FAILED:     "#2a0000",
-    VideoStatus.SKIPPED:    None,
 }
 
 _pool = QThreadPool.globalInstance()
@@ -78,19 +76,20 @@ class _ThumbLoader(QRunnable):
 # ── Sidebar widget ────────────────────────────────────────────────────────────
 
 class VideoSidebarWidget(QWidget):
-    """Left-panel video browser with async thumbnails, status badges, and auto-queue."""
+    """Left-panel video browser with status badges and sequential auto-queue."""
 
-    video_selected = Signal(Path)   # user clicked a video
-    queue_start    = Signal(Path)   # pipeline should start for this video
+    video_selected = Signal(Path)
+    queue_start    = Signal(Path)   # app.py connects → starts pipeline worker
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._folder:     Path | None                = None
-        self._item_map:   dict[str, QListWidgetItem] = {}   # path_str → item
-        self._statuses:   dict[str, VideoStatus]     = {}   # path_str → status
-        self._queue:      list[Path]                 = []   # ordered processing queue
-        self._processing: Path | None               = None  # currently running video
-        self._auto_queue: bool                       = False
+        self._folder:       Path | None                = None
+        self._item_map:     dict[str, QListWidgetItem] = {}
+        self._statuses:     dict[str, VideoStatus]     = {}
+        self._clean_thumbs: dict[str, QPixmap]         = {}   # dot-free originals
+        self._queue:        list[Path]                 = []
+        self._processing:   Path | None                = None
+        self._auto_queue:   bool                       = False
 
         self._watcher = FolderWatcher(self)
         self._watcher.file_appeared.connect(self._on_file_appeared)
@@ -121,11 +120,10 @@ class VideoSidebarWidget(QWidget):
         watch_row = QHBoxLayout()
         self._watch_btn = QPushButton("Watch OFF")
         self._watch_btn.setCheckable(True)
-        self._watch_btn.setFixedWidth(80)
+        self._watch_btn.setFixedWidth(82)
         self._watch_btn.setToolTip(
             "Monitor this folder for new video files.\n"
-            "When a recording finishes writing to disk, it is automatically\n"
-            "added to the processing queue (if auto-queue is enabled)."
+            "When a recording finishes writing, it appears here automatically."
         )
         self._watch_btn.toggled.connect(self._on_watch_toggled)
         self._watch_lbl = QLabel("Idle")
@@ -151,7 +149,7 @@ class VideoSidebarWidget(QWidget):
         self._list.customContextMenuRequested.connect(self._on_context_menu)
         layout.addWidget(self._list)
 
-        # Queue / status footer
+        # Footer
         footer_row = QHBoxLayout()
         self._status_lbl = QLabel("")
         self._status_lbl.setStyleSheet("font-size: 10px; color: #666;")
@@ -164,7 +162,7 @@ class VideoSidebarWidget(QWidget):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load_folder(self, folder: Path):
-        """Populate the list with all videos in *folder*."""
+        """Populate the list with all videos already in *folder*."""
         self._folder = folder
         name = folder.name if len(folder.name) < 32 else f"…{folder.name[-30:]}"
         self._folder_lbl.setText(name)
@@ -172,26 +170,24 @@ class VideoSidebarWidget(QWidget):
 
         self._item_map.clear()
         self._statuses.clear()
+        self._clean_thumbs.clear()
         self._list.clear()
 
         videos = sorted(
             p for p in folder.iterdir()
             if p.suffix.lower() in VIDEO_EXTS
         )
-        placeholder = _placeholder_icon()
         for vp in videos:
-            self._add_item(vp, placeholder)
+            self._add_item(vp)
 
         n = len(videos)
         self._status_lbl.setText(f"{n} video{'s' if n != 1 else ''}")
         self._apply_filter(self._search.text())
 
-        # Restart watcher on new folder if it was active
         if self._watcher.is_active:
             self._watcher.watch(folder)
 
     def select_video(self, path: Path):
-        """Programmatically highlight *path* without emitting video_selected."""
         item = self._item_map.get(str(path))
         if item:
             self._list.blockSignals(True)
@@ -204,127 +200,127 @@ class VideoSidebarWidget(QWidget):
     # ── Queue management (called by app.py) ───────────────────────────────────
 
     def enqueue(self, path: Path):
-        """Add *path* to the processing queue and start it if the GPU is free."""
         key = str(path)
         if key not in self._item_map:
-            self._add_item(path, _placeholder_icon())
-            sigs = _ThumbSignals()
-            sigs.done.connect(self._on_thumb_done)
-            _pool.start(_ThumbLoader(path, sigs))
+            self._add_item(path)
 
         if self._statuses.get(key) in (
             VideoStatus.QUEUED, VideoStatus.PROCESSING, VideoStatus.DONE
         ):
-            return   # already handled
+            return
 
         self._set_status(path, VideoStatus.QUEUED)
         self._queue.append(path)
-        self._update_queue_label()
+        self._update_footer()
         self._try_start_next()
 
     def mark_processing(self, path: Path):
         self._processing = path
         self._set_status(path, VideoStatus.PROCESSING)
-        self._update_queue_label()
+        self._update_footer()
 
     def mark_done(self, path: Path):
         self._set_status(path, VideoStatus.DONE)
         if self._processing == path:
             self._processing = None
-        self._update_queue_label()
+        self._update_footer()
         self._try_start_next()
 
     def mark_failed(self, path: Path):
         self._set_status(path, VideoStatus.FAILED)
         if self._processing == path:
             self._processing = None
-        self._update_queue_label()
+        self._update_footer()
         self._try_start_next()
 
     # ── Watcher callbacks ─────────────────────────────────────────────────────
 
     def _on_file_appeared(self, path: Path):
-        """New file detected — still being written."""
+        """New file just appeared in folder — still being written."""
         key = str(path)
         if key not in self._item_map:
-            self._add_item(path, _placeholder_icon())
-            sigs = _ThumbSignals()
-            sigs.done.connect(self._on_thumb_done)
-            _pool.start(_ThumbLoader(path, sigs))
+            self._add_item(path)
         self._set_status(path, VideoStatus.RECORDING)
         self._watch_lbl.setText(f"Recording: {path.name}")
 
     def _on_file_ready(self, path: Path):
-        """Recording finished — file is fully written."""
+        """Recording finished — file is fully written and released."""
         self._watch_lbl.setText(f"Ready: {path.name}")
         if self._auto_queue:
             self.enqueue(path)
         else:
+            # File is ready but not auto-queued: clear the "recording" badge
             self._set_status(path, VideoStatus.UNKNOWN)
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
-    def _add_item(self, vp: Path, icon: QIcon):
-        item = QListWidgetItem(icon, vp.name)
+    def _add_item(self, vp: Path):
+        item = QListWidgetItem(_placeholder_icon(), vp.name)
         item.setData(Qt.UserRole, vp)
         item.setToolTip(str(vp))
         self._list.addItem(item)
-        self._item_map[str(vp)] = item
-        self._statuses[str(vp)] = VideoStatus.UNKNOWN
-        self._apply_status_style(item, VideoStatus.UNKNOWN)
+        self._item_map[str(vp)]  = item
+        self._statuses[str(vp)]  = VideoStatus.UNKNOWN
 
         sigs = _ThumbSignals()
         sigs.done.connect(self._on_thumb_done)
         _pool.start(_ThumbLoader(vp, sigs))
 
     def _set_status(self, path: Path, status: VideoStatus):
-        key  = str(path)
+        key = str(path)
         self._statuses[key] = status
         item = self._item_map.get(key)
         if item:
             self._apply_status_style(item, status)
 
     def _apply_status_style(self, item: QListWidgetItem, status: VideoStatus):
-        bg  = _STATUS_BG.get(status)
-        dot = _STATUS_COLORS.get(status, "#555")
+        """
+        Redraw the item icon from the clean stored thumbnail (or placeholder)
+        then paint a single status dot on top.  Never reads the existing icon
+        so dots cannot accumulate across status changes.
+        """
+        path_str = str(item.data(Qt.UserRole))
 
+        clean = self._clean_thumbs.get(path_str)
+        if clean is not None:
+            px = clean.copy()
+        else:
+            px = QPixmap(THUMB_W, THUMB_H)
+            px.fill(QColor("#2a2a2a"))
+
+        # Paint dot for every status except UNKNOWN
+        if status != VideoStatus.UNKNOWN:
+            dot_color = _STATUS_DOT.get(status, "#555555")
+            painter = QPainter(px)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(QBrush(QColor(dot_color)))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(4, 4, DOT_R, DOT_R)
+            painter.end()
+
+        item.setIcon(QIcon(px))
+
+        bg = _STATUS_BG.get(status)
         if bg:
             item.setBackground(QBrush(QColor(bg)))
         else:
-            item.setBackground(QBrush())   # default
-
-        # Overlay a small colored dot on the existing icon
-        existing = item.icon()
-        px = existing.pixmap(THUMB_W, THUMB_H)
-        if not px.isNull():
-            painter = QPainter(px)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setBrush(QBrush(QColor(dot)))
-            painter.setPen(Qt.NoPen)
-            r = STATUS_DOT_SIZE
-            painter.drawEllipse(4, 4, r, r)
-            painter.end()
-            item.setIcon(QIcon(px))
+            item.setBackground(QBrush())
 
         item.setToolTip(f"{item.data(Qt.UserRole)}\nStatus: {status.value}")
 
     def _try_start_next(self):
         if self._processing is not None:
-            return   # GPU busy with another video
+            return
         while self._queue:
             nxt = self._queue.pop(0)
             if self._statuses.get(str(nxt)) == VideoStatus.QUEUED:
                 self.queue_start.emit(nxt)
                 return
-        self._update_queue_label()
+        self._update_footer()
 
-    def _update_queue_label(self):
-        n_queued = sum(
-            1 for s in self._statuses.values() if s == VideoStatus.QUEUED
-        )
-        n_done = sum(
-            1 for s in self._statuses.values() if s == VideoStatus.DONE
-        )
+    def _update_footer(self):
+        n_queued = sum(1 for s in self._statuses.values() if s == VideoStatus.QUEUED)
+        n_done   = sum(1 for s in self._statuses.values() if s == VideoStatus.DONE)
         parts = []
         if self._processing:
             parts.append(f"Processing: {self._processing.name}")
@@ -369,20 +365,16 @@ class VideoSidebarWidget(QWidget):
         item = self._item_map.get(path_str)
         if item is None or rgb is None:
             return
+
+        # Build clean pixmap from raw frame data and store it
         h, w, c = rgb.shape
-        qi  = QImage(rgb.data, w, h, w * c, QImage.Format_RGB888)
-        new_px = QPixmap.fromImage(qi.copy())
-        # Re-apply the status dot on the fresh thumbnail
+        qi      = QImage(rgb.data, w, h, w * c, QImage.Format_RGB888)
+        clean   = QPixmap.fromImage(qi.copy())
+        self._clean_thumbs[path_str] = clean
+
+        # Immediately apply the current status dot on a fresh copy
         status = self._statuses.get(path_str, VideoStatus.UNKNOWN)
-        dot = _STATUS_COLORS.get(status, "#555")
-        painter = QPainter(new_px)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setBrush(QBrush(QColor(dot)))
-        painter.setPen(Qt.NoPen)
-        r = STATUS_DOT_SIZE
-        painter.drawEllipse(4, 4, r, r)
-        painter.end()
-        item.setIcon(QIcon(new_px))
+        self._apply_status_style(item, status)
 
     def _apply_filter(self, text: str):
         q = text.strip().lower()
@@ -399,22 +391,17 @@ class VideoSidebarWidget(QWidget):
 
         menu = QMenu(self)
         if status not in (VideoStatus.QUEUED, VideoStatus.PROCESSING, VideoStatus.DONE):
-            add_act = QAction("Add to queue", self)
-            add_act.triggered.connect(lambda: self.enqueue(path))
-            menu.addAction(add_act)
-
+            act = QAction("Add to queue", self)
+            act.triggered.connect(lambda: self.enqueue(path))
+            menu.addAction(act)
         if status == VideoStatus.QUEUED:
-            skip_act = QAction("Remove from queue", self)
-            skip_act.triggered.connect(
-                lambda: self._set_status(path, VideoStatus.SKIPPED)
-            )
-            menu.addAction(skip_act)
-
+            act = QAction("Remove from queue", self)
+            act.triggered.connect(lambda: self._set_status(path, VideoStatus.SKIPPED))
+            menu.addAction(act)
         if status == VideoStatus.DONE:
-            redo_act = QAction("Re-queue (reprocess)", self)
-            redo_act.triggered.connect(lambda: self.enqueue(path))
-            menu.addAction(redo_act)
-
+            act = QAction("Re-queue (reprocess)", self)
+            act.triggered.connect(lambda: self.enqueue(path))
+            menu.addAction(act)
         if not menu.isEmpty():
             menu.exec(self._list.viewport().mapToGlobal(pos))
 
