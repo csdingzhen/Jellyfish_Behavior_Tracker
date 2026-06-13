@@ -367,6 +367,175 @@ def run_sam2(
     return all_stats, contour_arr, dye_track
 
 
+# ── Streaming SAM2 (no pre-extracted frame pool) ──────────────────────────────
+
+def run_sam2_streaming(
+    predictor,
+    video_path: Path,
+    stride: int,
+    click_point: tuple[int, int],
+    mask_dir: Path,
+    total_strided_frames: int,
+    window_size: int,
+    save_indices: set[int],
+    dye_click: tuple[int, int] | None = None,
+    progress_callback=None,
+    cancel_event=None,
+) -> tuple[list[tuple[float, float, float]], np.ndarray, list[tuple[float, float]]]:
+    """
+    Streaming variant of run_sam2.
+
+    Reads video_path directly and keeps at most window_size JPEG files on disk
+    at any moment.  Unlike run_sam2(), this never creates a large pre-extracted
+    frame pool.  For a 1-hour 120fps video at stride=4 (108,000 strided frames),
+    peak disk usage is window_size × ~20 KB ≈ 4 MB instead of ~2 GB.
+
+    Same signature and return type as run_sam2().
+    """
+    if save_indices:
+        mask_dir.mkdir(parents=True, exist_ok=True)
+
+    win_dir      = mask_dir.parent / "_sam2_win_tmp"
+    contour_arr  = np.zeros((total_strided_frames, N_CONTOUR_ANGLES), dtype=np.float32)
+    all_stats:    list[tuple[float, float, float]] = []
+    dye_track:    list[tuple[float, float]]        = []
+    prev_mask:    np.ndarray | None = None
+    prev_dye_mask: np.ndarray | None = None
+    n_windows    = math.ceil(total_strided_frames / window_size)
+
+    cap = cv2.VideoCapture(str(video_path))
+    raw_frame_idx = 0   # sequential position in raw video (never resets)
+
+    try:
+        for win_idx in range(n_windows):
+            if cancel_event is not None and cancel_event.is_set():
+                break
+
+            win_start = win_idx * window_size
+            win_end   = min(win_start + window_size, total_strided_frames)
+            n_target  = win_end - win_start
+
+            msg = f"Window {win_idx + 1}/{n_windows} (frames {win_start}–{win_end - 1})"
+            print(f"\n  {msg}")
+            if progress_callback is not None:
+                progress_callback(win_start, total_strided_frames, msg)
+
+            # ── Extract only this window's frames directly ────────────────────
+            if win_dir.exists():
+                shutil.rmtree(win_dir)
+            win_dir.mkdir()
+
+            local_count = 0
+            while local_count < n_target:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                if raw_frame_idx % stride == 0:
+                    cv2.imwrite(
+                        str(win_dir / f"{local_count:06d}.jpg"),
+                        frame,
+                        [cv2.IMWRITE_JPEG_QUALITY, 95],
+                    )
+                    local_count += 1
+                raw_frame_idx += 1
+
+            if local_count == 0:
+                break
+            n = local_count   # actual frames extracted (may be < n_target at end)
+
+            # ── SAM2 propagation on this window ───────────────────────────────
+            with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+                state = predictor.init_state(
+                    str(win_dir),
+                    offload_video_to_cpu=True,
+                    offload_state_to_cpu=True,
+                    async_loading_frames=True,
+                )
+
+                if prev_mask is None:
+                    predictor.add_new_points_or_box(
+                        state, frame_idx=0, obj_id=1,
+                        points=np.array(
+                            [[float(click_point[0]), float(click_point[1])]],
+                            dtype=np.float32),
+                        labels=np.array([1], dtype=np.int32),
+                    )
+                    if dye_click is not None:
+                        predictor.add_new_points_or_box(
+                            state, frame_idx=0, obj_id=2,
+                            points=np.array(
+                                [[float(dye_click[0]), float(dye_click[1])]],
+                                dtype=np.float32),
+                            labels=np.array([1], dtype=np.int32),
+                        )
+                else:
+                    predictor.add_new_mask(state, frame_idx=0, obj_id=1, mask=prev_mask)
+                    if dye_click is not None and prev_dye_mask is not None:
+                        predictor.add_new_mask(
+                            state, frame_idx=0, obj_id=2, mask=prev_dye_mask)
+
+                local_masks:     dict[int, np.ndarray] = {}
+                local_dye_masks: dict[int, np.ndarray] = {}
+
+                for local_idx, obj_ids, logits in tqdm(
+                    predictor.propagate_in_video(state, max_frame_num_to_track=n),
+                    total=n,
+                    desc=f"  SAM2 win {win_idx + 1}",
+                    unit="fr",
+                    leave=False,
+                ):
+                    id_list = list(obj_ids)
+                    if 1 in id_list:
+                        local_masks[local_idx] = (
+                            logits[id_list.index(1), 0] > 0.0).cpu().numpy()
+                    if dye_click is not None and 2 in id_list:
+                        local_dye_masks[local_idx] = (
+                            logits[id_list.index(2), 0] > 0.0).cpu().numpy()
+
+            # ── Collect stats (same logic as run_sam2) ────────────────────────
+            for local_idx in range(n):
+                global_idx = win_start + local_idx
+                mask = local_masks.get(local_idx)
+                if mask is None:
+                    all_stats.append((0.0, 0.0, 0.0))
+                    if dye_click is not None:
+                        dye_track.append((0.0, 0.0))
+                    continue
+                if global_idx in save_indices:
+                    cv2.imwrite(
+                        str(mask_dir / f"{global_idx:06d}.png"),
+                        (mask.astype(np.uint8) * 255),
+                    )
+                stats = mask_to_stats(mask)
+                all_stats.append(stats)
+                cx, cy, radius = stats
+                contour_arr[global_idx] = mask_to_contour(mask, cx, cy, radius)
+
+                if dye_click is not None:
+                    dye_mask = local_dye_masks.get(local_idx)
+                    if dye_mask is not None and dye_mask.any():
+                        dm = cv2.moments(dye_mask.astype(np.uint8))
+                        if dm["m00"] > 0:
+                            dye_track.append(
+                                (dm["m10"] / dm["m00"], dm["m01"] / dm["m00"]))
+                        else:
+                            dye_track.append((0.0, 0.0))
+                    else:
+                        dye_track.append((0.0, 0.0))
+
+            if local_masks:
+                prev_mask = local_masks[max(local_masks)]
+            if dye_click is not None and local_dye_masks:
+                prev_dye_mask = local_dye_masks[max(local_dye_masks)]
+
+    finally:
+        cap.release()
+        if win_dir.exists():
+            shutil.rmtree(win_dir)
+
+    return all_stats, contour_arr, dye_track
+
+
 # ── Validation mosaic ─────────────────────────────────────────────────────────
 
 def _square_panel(img_bgr: np.ndarray, size: int):

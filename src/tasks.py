@@ -67,7 +67,7 @@ def _run_sam2_task(
     stride:        int,
     window_size:   int,
     save_n_masks:  int,
-    delete_frames: bool = False,
+    delete_frames: bool = False,     # kept for API compat; streaming never creates frames_dir
     dye_click:     tuple[int, int] | None = None,    # PERF: track dye inside SAM2
     image_size:    int | None = None,                # PERF: override internal ViT resolution
     progress_callback: Callable | None = None,
@@ -76,41 +76,30 @@ def _run_sam2_task(
     import torch
     import cv2
     from scripts.run_sam2 import (
-        extract_frames, run_sam2, mask_to_stats,
+        run_sam2_streaming, mask_to_stats,
         N_CONTOUR_ANGLES,
     )
-    import csv, math
-
-    stem       = _stem(video_path)
-    frames_dir = _out(video_path, f"{stem}_frames")
-    mask_dir   = _out(video_path, f"{stem}_masks")
-    seg_csv    = _out(video_path, f"{stem}_seg.csv")
-    cont_npy   = _out(video_path, f"{stem}_contour_radii.npy")
+    stem     = _stem(video_path)
+    mask_dir = _out(video_path, f"{stem}_masks")
+    seg_csv  = _out(video_path, f"{stem}_seg.csv")
+    cont_npy = _out(video_path, f"{stem}_contour_radii.npy")
 
     cap     = cv2.VideoCapture(str(video_path))
     fps_raw = cap.get(cv2.CAP_PROP_FPS)
     total   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
 
-    n_extracted = (total + stride - 1) // stride
-
-    if progress_callback:
-        progress_callback(0, n_extracted, "Extracting frames...")
-
-    n_extracted = extract_frames(video_path, frames_dir, stride)
-
-    if cancel_event and cancel_event.is_set():
-        return
+    n_strided = (total + stride - 1) // stride
 
     # Determine which frames to save as PNG masks
     if save_n_masks > 0:
-        idxs         = np.linspace(0, n_extracted - 1, save_n_masks, dtype=int)
+        idxs         = np.linspace(0, n_strided - 1, save_n_masks, dtype=int)
         save_indices = set(idxs.tolist())
     else:
         save_indices = set()
 
     if progress_callback:
-        progress_callback(0, n_extracted, "Loading SAM2...")
+        progress_callback(0, n_strided, "Loading SAM2...")
 
     from sam2.build_sam import build_sam2_video_predictor
     from config import SAM2_CONFIG
@@ -121,9 +110,9 @@ def _run_sam2_task(
         hydra_overrides_extra=overrides if overrides else None,
     )
 
-    seg_stats, contour_arr, dye_track_list = run_sam2(
-        predictor, frames_dir, bell_click, mask_dir,
-        n_extracted, window_size, save_indices,
+    seg_stats, contour_arr, dye_track_list = run_sam2_streaming(
+        predictor, video_path, stride, bell_click, mask_dir,
+        n_strided, window_size, save_indices,
         dye_click=dye_click,
         progress_callback=progress_callback,
         cancel_event=cancel_event,
@@ -155,15 +144,8 @@ def _run_sam2_task(
                 w.writerow([raw, f"{raw / fps_raw:.4f}",
                             f"{dx:.2f}", f"{dy:.2f}", vis])
 
-    # Delete extracted JPEG frames if requested (saves 5+ GB for long videos)
-    if delete_frames and frames_dir.exists():
-        import shutil as _shutil
-        if progress_callback:
-            progress_callback(n_extracted, n_extracted, "Cleaning up JPEG frames...")
-        _shutil.rmtree(frames_dir)
-
     if progress_callback:
-        progress_callback(n_extracted, n_extracted, "SAM2 complete")
+        progress_callback(n_strided, n_strided, "SAM2 complete")
 
 
 def make_sam2_task(
@@ -209,6 +191,7 @@ def _run_cotracker_task(
     dye_click:   tuple[int, int],
     stride:      int,
     chunk_size:  int,
+    render_annotated_s: float = 0.0,   # 0 = skip render; >0 = render first N seconds
     progress_callback: Callable | None = None,
     cancel_event:      threading.Event | None = None,
 ) -> None:
@@ -241,10 +224,12 @@ def _run_cotracker_task(
     OUTPUTS_DIR.mkdir(exist_ok=True)
     write_csv(track_csv, tracks, visible, fps, stride)
 
-    if not (cancel_event and cancel_event.is_set()):
+    if render_annotated_s > 0 and not (cancel_event and cancel_event.is_set()):
         if progress_callback:
             progress_callback(total_raw, total_raw, "Rendering tracked video...")
-        render_video(cap, tracks, visible, track_vid, fps, stride)
+        max_strided = int(render_annotated_s * fps / stride)
+        render_video(cap, tracks[:max_strided], visible[:max_strided],
+                     track_vid, fps, stride)
 
     cap.release()
 
@@ -255,8 +240,9 @@ def _run_cotracker_task(
 def make_cotracker_task(
     video_path: Path,
     dye_click:  tuple[int, int],
-    stride:     int = 4,
-    chunk_size: int = 400,
+    stride:     int   = 4,
+    chunk_size: int   = 400,
+    render_annotated_s: float = 0.0,   # 0 = skip render; >0 = first N seconds only
 ) -> Task:
     stem = _stem(video_path)
     return Task(
@@ -268,10 +254,11 @@ def make_cotracker_task(
         outputs     = [_out(video_path, f"{stem}_track.csv")],
         weight      = 3.0,
         task_kwargs = dict(
-            video_path = video_path,
-            dye_click  = dye_click,
-            stride     = stride,
-            chunk_size = chunk_size,
+            video_path          = video_path,
+            dye_click           = dye_click,
+            stride              = stride,
+            chunk_size          = chunk_size,
+            render_annotated_s  = render_annotated_s,
         ),
     )
 
@@ -411,6 +398,7 @@ def _run_analysis_task(
     pre_window:   int,
     min_distance: float,
     prominence:   float,
+    max_annotated_s: float = 60.0,   # 0 = skip annotated video; >0 = first N seconds
     progress_callback: Callable | None = None,
     cancel_event:      threading.Event | None = None,
 ) -> None:
@@ -491,12 +479,14 @@ def _run_analysis_task(
     summary_plot(results, calib, total_activity, peaks, frame_indices, fps_raw, plot_out)
 
     # Annotated video — non-fatal: encoding failure does not fail the task
-    if results and not (cancel_event and cancel_event.is_set()):
+    if results and max_annotated_s > 0 and not (cancel_event and cancel_event.is_set()):
         if progress_callback:
             progress_callback(len(peaks), len(peaks), "Rendering annotated video...")
+        max_raw_frames = int(max_annotated_s * fps_raw)
         try:
             render_annotated_video(results, calib, video_path, vid_out,
-                                   seg, dye_track, fps_raw, stride)
+                                   seg, dye_track, fps_raw, stride,
+                                   max_raw_frames=max_raw_frames)
         except Exception as _vid_err:
             print(f"[warn] Annotated video rendering failed (results still saved): {_vid_err}")
 
@@ -511,6 +501,7 @@ def make_analysis_task(
     pre_window:   int   = 30,
     min_distance: float = 0.42,
     prominence:   float = 0.05,
+    max_annotated_s: float = 60.0,   # 0 = skip annotated video; >0 = first N seconds
 ) -> Task:
     stem = _stem(video_path)
     return Task(
@@ -530,11 +521,12 @@ def make_analysis_task(
         ],
         weight      = 0.5,
         task_kwargs = dict(
-            video_path   = video_path,
-            calib_path   = calib_path,
-            stride       = stride,
-            pre_window   = pre_window,
-            min_distance = min_distance,
-            prominence   = prominence,
+            video_path       = video_path,
+            calib_path       = calib_path,
+            stride           = stride,
+            pre_window       = pre_window,
+            min_distance     = min_distance,
+            prominence       = prominence,
+            max_annotated_s  = max_annotated_s,
         ),
     )

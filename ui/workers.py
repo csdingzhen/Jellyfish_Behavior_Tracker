@@ -79,6 +79,7 @@ def run_pipeline_worker(
     PipelineResult on completion (received by the `returned` callback).
     """
     import time
+    import concurrent.futures
 
     if rerun_sam2 or rerun_cotrack or rerun_analysis:
         _delete_cached_outputs(
@@ -90,37 +91,34 @@ def run_pipeline_worker(
 
     relay = ProgressRelay()
 
-    # resolve SAM2 weights path from model name
-    from config import WEIGHTS_DIR
-    model_name = params.sam2_model.value
-    weights_map = {
-        "tiny":      "sam2.1_hiera_tiny.pt",
-        "small":     "sam2.1_hiera_small.pt",
-        "base_plus": "sam2.1_hiera_base_plus.pt",
-        "large":     "sam2.1_hiera_large.pt",
-    }
-    # image_size override not exposed in UI params; use None (pipeline default)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(
+            run_pipeline,
+            video_path        = video_path,
+            bell_click        = bell_click,
+            dye_click         = dye_click,
+            calib_path        = calib_path,
+            stride            = params.stride,
+            cotracker_stride  = params.cotracker_stride,
+            pre_window        = params.pre_window,
+            inner_frac        = params.inner_frac,
+            outer_frac        = params.outer_frac,
+            prominence        = params.prominence,
+            progress_callback = relay.callback,
+            cancel_event      = cancel_event,
+        )
+        # Drain relay every 200 ms so Qt event loop gets smooth progress updates
+        # rather than a single flood of all events after completion.
+        while not future.done():
+            time.sleep(0.2)
+            for ev in relay.drain():
+                yield ev
 
-    result = run_pipeline(
-        video_path        = video_path,
-        bell_click        = bell_click,
-        dye_click         = dye_click,
-        calib_path        = calib_path,
-        stride            = params.stride,
-        cotracker_stride  = params.cotracker_stride,
-        pre_window        = params.pre_window,
-        inner_frac        = params.inner_frac,
-        outer_frac        = params.outer_frac,
-        prominence        = params.prominence,
-        progress_callback = relay.callback,
-        cancel_event      = cancel_event,
-    )
-
-    # Drain any remaining events
+    # Final drain for any events emitted after the last sleep
     for ev in relay.drain():
         yield ev
 
-    return result
+    return future.result()   # re-raises if pipeline raised an exception
 
 
 def _delete_cached_outputs(

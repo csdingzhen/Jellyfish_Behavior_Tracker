@@ -177,7 +177,13 @@ def main():
         worker.returned.connect(_on_done)
         worker.errored.connect(_on_error)
 
-        # Also forward progress to the Process tab if it's visible
+        # Forward progress to sidebar per-video bar and to Process tab (if open)
+        _path = path   # capture for lambda
+        worker.yielded.connect(
+            lambda ev: sidebar.update_video_progress(
+                _path, ev.overall_fraction, ev.task_name
+            )
+        )
         if widget.process_tab is not None:
             worker.yielded.connect(widget.process_tab._on_progress_event)
 

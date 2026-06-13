@@ -66,6 +66,7 @@ class FolderWatcher(QObject):
 
     file_ready    = Signal(Path)   # recording complete
     file_appeared = Signal(Path)   # first detected (still may be recording)
+    file_removed  = Signal(Path)   # previously-known file no longer on disk
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,10 +117,16 @@ class FolderWatcher(QObject):
                 self._pending[path] = []
                 self.file_appeared.emit(path)
 
+        # Known files that have disappeared from disk
+        for path in list(self._known - current):
+            self._known.discard(path)
+            self.file_removed.emit(path)
+
         # Check each pending file
         for path in list(self._pending):
             if path not in current:
                 del self._pending[path]
+                self.file_removed.emit(path)   # disappeared before it was ready
                 continue
             try:
                 size = path.stat().st_size

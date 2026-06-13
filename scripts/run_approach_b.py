@@ -646,6 +646,7 @@ def render_annotated_video(
     fps:        float,
     stride:     int,
     show_window: int = 20,
+    max_raw_frames: int | None = None,   # stop after this many raw frames (None = full video)
 ) -> None:
     pulse_index: dict[int, dict] = {}
     for r in results:
@@ -656,6 +657,8 @@ def render_annotated_video(
 
     cap    = cv2.VideoCapture(str(video_path))
     total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if max_raw_frames is not None:
+        total = min(total, max_raw_frames)
     h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     writer = _open_writer(out_path, fps / stride, w, h)
@@ -666,6 +669,8 @@ def render_annotated_video(
         while True:
             ret, frame = cap.read()
             if not ret:
+                break
+            if max_raw_frames is not None and raw_idx >= max_raw_frames:
                 break
             if raw_idx % stride != 0:
                 raw_idx += 1
