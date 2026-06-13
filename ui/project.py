@@ -35,11 +35,16 @@ CALIB_DIR    = Path(__file__).parent.parent / "calibration"
 
 @dataclass
 class ProjectState:
-    name:         str  = "Untitled"
-    video_folder: str  = ""
-    calibration:  str  = ""
-    parameters:   dict = field(default_factory=dict)
-    videos:       dict = field(default_factory=dict)
+    name:         str        = "Untitled"
+    video_folder: str        = ""
+    calibration:  str        = ""
+    parameters:   dict       = field(default_factory=dict)
+    videos:       dict       = field(default_factory=dict)
+
+    # Shared annotation — used for all videos unless overridden per-video.
+    # Updated automatically after each successful pipeline run (continuity).
+    shared_bell_click: list | None = None   # [x, y] in frame-0 pixels
+    shared_dye_click:  list | None = None   # [x, y] in frame-0 pixels
 
     # Not serialised — runtime only
     _path: Path | None = field(default=None, repr=False, compare=False)
@@ -100,6 +105,40 @@ def _add_recent(path: Path) -> None:
         _RECENT_FILE.write_text(json.dumps(recent[:_MAX_RECENT]))
     except OSError:
         pass
+
+
+def extract_continuity_clicks(
+    seg_csv: "Path | None",
+    track_csv: "Path | None",
+) -> tuple[list | None, list | None]:
+    """
+    Read the last row of seg_csv and track_csv to get updated bell/dye
+    positions for the next video.  Returns (bell_click, dye_click) as
+    [x, y] lists, or None if the CSV cannot be read.
+    """
+    bell = None
+    dye  = None
+    try:
+        if seg_csv and seg_csv.exists():
+            import csv
+            with open(seg_csv) as f:
+                rows = list(csv.DictReader(f))
+            if rows:
+                last = rows[-1]
+                bell = [float(last["cx"]), float(last["cy"])]
+    except Exception:
+        pass
+    try:
+        if track_csv and track_csv.exists():
+            import csv
+            with open(track_csv) as f:
+                rows = list(csv.DictReader(f))
+            if rows:
+                last = rows[-1]
+                dye = [float(last["x"]), float(last["y"])]
+    except Exception:
+        pass
+    return bell, dye
 
 
 def load_recent() -> list[str]:

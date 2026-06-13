@@ -18,12 +18,14 @@ from qtpy.QtWidgets import (
 from qtpy.QtCore import Qt
 
 from .project import ProjectBar
+from .hardware import HardwareWidget
 
 
 class CassiopeaWidget(QWidget):
     """
     Top-level dock widget with:
       - ProjectBar (New / Open / Save + project name label)
+      - HardwareWidget (collapsible GPU status + auto-queue toggle)
       - Two lazy tabs: Calibrate and Process
     """
 
@@ -44,6 +46,10 @@ class CassiopeaWidget(QWidget):
         self.project_bar = ProjectBar()
         self.project_bar.project_changed.connect(self._on_project_changed)
         layout.addWidget(self.project_bar)
+
+        # Collapsible hardware panel
+        self.hw_widget = HardwareWidget()
+        layout.addWidget(self.hw_widget)
 
         self.tabs = QTabWidget()
         layout.addWidget(self.tabs)

@@ -52,10 +52,12 @@ def _make_icon(svg_path: Path):
 
 
 def main():
+    import threading
     import napari
     from qtpy.QtWidgets import QApplication
     from .widget import CassiopeaWidget
     from .sidebar import VideoSidebarWidget
+    from .project import extract_continuity_clicks
 
     viewer = napari.Viewer(title="Cassiopea Pipeline")
     _simplify_viewer(viewer)
@@ -65,7 +67,7 @@ def main():
         QApplication.instance().setWindowIcon(icon)
         viewer.window._qt_window.setWindowIcon(icon)
 
-    # Right dock — main workflow tabs
+    # Right dock — main workflow tabs + hardware panel
     widget = CassiopeaWidget(viewer)
     viewer.window.add_dock_widget(
         widget,
@@ -74,7 +76,7 @@ def main():
         allowed_areas=["right", "left"],
     )
 
-    # Left dock — video browser sidebar
+    # Left dock — video browser / queue
     sidebar = VideoSidebarWidget()
     viewer.window.add_dock_widget(
         sidebar,
@@ -83,16 +85,105 @@ def main():
         allowed_areas=["left", "right"],
     )
 
-    # Connect sidebar → process tab
+    # ── Signal wiring ─────────────────────────────────────────────────────────
+
+    # Clicking a video in sidebar → load into viewer
     sidebar.video_selected.connect(widget.on_video_selected)
 
-    # Connect project bar → sidebar (auto-load folder when project opens/creates)
-    def _on_project_for_sidebar(state):
+    # Project opened/created → load video folder into sidebar + notify process tab
+    def _on_project_changed(state):
         if state.video_folder:
-            from pathlib import Path
             sidebar.load_folder(Path(state.video_folder))
 
-    widget.project_bar.project_changed.connect(_on_project_for_sidebar)
+    widget.project_bar.project_changed.connect(_on_project_changed)
+
+    # Hardware widget auto-queue toggle → sidebar
+    widget.hw_widget.auto_queue_changed.connect(sidebar.set_auto_queue)
+
+    # ── Auto-queue pipeline runner ────────────────────────────────────────────
+    # When sidebar decides a video should start, this function is called.
+    # It resolves bell/dye clicks (shared annotation + continuity) and
+    # starts the pipeline worker.
+
+    _active_worker = [None]   # mutable cell so inner closures can replace it
+
+    def _start_queued_video(path: Path):
+        state = widget.project_bar.project
+        if state is None:
+            sidebar.mark_failed(path)
+            return
+
+        # Resolve annotation: per-video overrides shared, shared is updated
+        # after each completed run for continuity.
+        bell_raw, dye_raw = state.get_clicks(path)
+        if bell_raw is None:
+            bell_raw = state.shared_bell_click
+        if dye_raw is None:
+            dye_raw = state.shared_dye_click
+
+        if bell_raw is None or dye_raw is None:
+            # No annotation available — fall back to manual (load video for user)
+            sidebar.mark_failed(path)
+            widget.on_video_selected(path)
+            return
+
+        calib_path = Path(state.calibration) if state.calibration else None
+        if calib_path is None or not calib_path.exists():
+            sidebar.mark_failed(path)
+            return
+
+        bell_click = (int(bell_raw[0]), int(bell_raw[1]))
+        dye_click  = (int(dye_raw[0]),  int(dye_raw[1]))
+
+        # Build params from process tab (if built) or defaults
+        from .parameters import PipelineParams
+        params = (widget.process_tab._params
+                  if widget.process_tab is not None
+                  else PipelineParams())
+
+        sidebar.mark_processing(path)
+
+        from .workers import run_pipeline_worker
+        cancel_ev = threading.Event()
+        worker = run_pipeline_worker(
+            video_path   = path,
+            bell_click   = bell_click,
+            dye_click    = dye_click,
+            calib_path   = calib_path,
+            params       = params,
+            cancel_event = cancel_ev,
+        )
+        _active_worker[0] = worker
+
+        def _on_done(result):
+            if result.success:
+                sidebar.mark_done(path)
+                # Continuity: update shared annotation from last-frame outputs
+                bell_new, dye_new = extract_continuity_clicks(
+                    result.seg_csv, result.track_csv
+                )
+                if bell_new:
+                    state.shared_bell_click = bell_new
+                if dye_new:
+                    state.shared_dye_click = dye_new
+                if state._path:
+                    state.save()
+            else:
+                sidebar.mark_failed(path)
+
+        def _on_error(_):
+            sidebar.mark_failed(path)
+
+        worker.returned.connect(_on_done)
+        worker.errored.connect(_on_error)
+
+        # Also forward progress to the Process tab if it's visible
+        if widget.process_tab is not None:
+            worker.yielded.connect(widget.process_tab._on_progress_event)
+
+        worker.start()
+
+    sidebar.queue_start.connect(_start_queued_video)
 
     napari.run()
 
