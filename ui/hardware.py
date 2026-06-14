@@ -208,7 +208,9 @@ class HardwareWidget(QWidget):
             import torch
             used  = torch.cuda.memory_allocated(0) / 1e9
             total = self._hw.gpu_vram_gb
-            frac  = used / total if total > 0 else 0.0
+            # Laptop GPUs can spill into shared system RAM; cap display at dedicated VRAM
+            display_used = min(used, total)
+            frac  = display_used / total if total > 0 else 0.0
             pct   = frac * 100
 
             self._vram_bar.setValue(int(frac * 1000))
@@ -217,7 +219,7 @@ class HardwareWidget(QWidget):
             self._vram_bar.setStyleSheet(
                 f"QProgressBar::chunk {{ background: {chunk}; }}"
             )
-            self._vram_detail.setText(f"{used:.2f} / {total:.1f} GB")
+            self._vram_detail.setText(f"{display_used:.2f} / {total:.1f} GB")
 
             if self._gpu_gate:
                 active = self._gpu_gate.active_count

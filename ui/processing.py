@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -37,6 +38,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 CALIB_DIR = Path(__file__).parent.parent / "calibration"
 
 
+def _fmt_time(seconds: float) -> str:
+    s = int(seconds)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
 class ProcessingTab(QWidget):
     """
     Process tab.
@@ -59,8 +67,9 @@ class ProcessingTab(QWidget):
         self._calib_path:  Path | None  = None
         self._bell_click:  tuple | None = None
         self._dye_click:   tuple | None = None
-        self._cancel_event: threading.Event | None = None
-        self._worker = None
+        self._cancel_event:   threading.Event | None = None
+        self._worker          = None
+        self._run_start_time: float | None = None
 
         # napari layer handles
         self._frame_layer = None
@@ -197,6 +206,12 @@ class ProcessingTab(QWidget):
         self.overall_bar.setValue(0)
         self.overall_bar.setFormat("Overall: %p%")
         progress_layout.addWidget(self.overall_bar)
+
+        self._timer_label = QLabel("")
+        self._timer_label.setAlignment(Qt.AlignCenter)
+        self._timer_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._timer_label.setVisible(False)
+        progress_layout.addWidget(self._timer_label)
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
@@ -521,6 +536,9 @@ class ProcessingTab(QWidget):
                 return
 
         self._reset_progress()
+        self._run_start_time = time.monotonic()
+        self._timer_label.setText("Elapsed  00:00  ·  ETA  calculating…")
+        self._timer_label.setVisible(True)
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self._cancel_event = threading.Event()
@@ -557,6 +575,8 @@ class ProcessingTab(QWidget):
         for lbl in self._progress_labels.values():
             lbl.setText("pending")
         self.overall_bar.setValue(0)
+        self._timer_label.setVisible(False)
+        self._run_start_time = None
         self.log_area.clear()
         self.result_label.setText("Running…")
         self.result_plot_label.clear()
@@ -569,23 +589,52 @@ class ProcessingTab(QWidget):
             self._progress_labels[name].setText(event.status.name.lower())
             if event.message:
                 self._log(f"[{name}] {event.message}")
-        self.overall_bar.setValue(int(event.overall_fraction * 100))
+        overall = event.overall_fraction
+        self.overall_bar.setValue(int(overall * 100))
+
+        if self._run_start_time is not None:
+            elapsed = time.monotonic() - self._run_start_time
+            if overall > 0.02:
+                remaining = elapsed / overall * (1.0 - overall)
+                eta_str = f"~{_fmt_time(remaining)}"
+            else:
+                eta_str = "calculating…"
+            self._timer_label.setText(
+                f"Elapsed  {_fmt_time(elapsed)}  ·  ETA  {eta_str}"
+            )
 
     def _on_pipeline_done(self, result):
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         if result.success:
+            elapsed = (time.monotonic() - self._run_start_time
+                       if self._run_start_time else 0.0)
+            self._timer_label.setText(f"Completed in {_fmt_time(elapsed)}")
             self._log("Pipeline completed successfully.")
             self._load_results(result)
         else:
+            self._on_cancel_reset()
             self._log("Pipeline failed or was cancelled.")
             self.result_label.setText("Pipeline failed — check log.")
 
     def _on_pipeline_error(self, exc_info):
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
+        self._on_cancel_reset()
         self._log(f"Pipeline error: {exc_info[1]}")
         self.result_label.setText(f"Error: {exc_info[1]}")
+
+    def _on_cancel_reset(self):
+        """Reset all progress bars to zero after a cancel or failure."""
+        for bar in self._progress_bars.values():
+            bar.setValue(0)
+        for lbl in self._progress_labels.values():
+            lbl.setText("—")
+        self.overall_bar.setValue(0)
+        elapsed = (time.monotonic() - self._run_start_time
+                   if self._run_start_time else 0.0)
+        self._timer_label.setText(f"Cancelled after {_fmt_time(elapsed)}")
+        self._run_start_time = None
 
     # ── Results display ───────────────────────────────────────────────────────
 

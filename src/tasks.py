@@ -70,6 +70,7 @@ def _run_sam2_task(
     delete_frames: bool = False,     # kept for API compat; streaming never creates frames_dir
     dye_click:     tuple[int, int] | None = None,    # PERF: track dye inside SAM2
     image_size:    int | None = None,                # PERF: override internal ViT resolution
+    sentinel_path: Path | None = None,               # written only on successful completion
     progress_callback: Callable | None = None,
     cancel_event:      threading.Event | None = None,
 ) -> None:
@@ -118,6 +119,10 @@ def _run_sam2_task(
         cancel_event=cancel_event,
     )
 
+    # Do not write partial outputs if the run was cancelled
+    if cancel_event and cancel_event.is_set():
+        return
+
     # Write seg CSV
     run_dir(video_path).mkdir(parents=True, exist_ok=True)
     import csv as _csv
@@ -144,6 +149,10 @@ def _run_sam2_task(
                 w.writerow([raw, f"{raw / fps_raw:.4f}",
                             f"{dx:.2f}", f"{dy:.2f}", vis])
 
+    # Sentinel written last — scheduler skips this task only when it exists
+    if sentinel_path is not None:
+        sentinel_path.touch()
+
     if progress_callback:
         progress_callback(n_strided, n_strided, "SAM2 complete")
 
@@ -158,11 +167,13 @@ def make_sam2_task(
     dye_click:      tuple[int, int] | None = None,   # PERF: track dye inside SAM2
     image_size:     int | None = None,               # PERF: override ViT resolution
 ) -> Task:
-    stem    = _stem(video_path)
-    outputs = [_out(video_path, f"{stem}_seg.csv"),
-               _out(video_path, f"{stem}_contour_radii.npy")]
+    stem     = _stem(video_path)
+    sentinel = _out(video_path, f"{stem}_sam2.complete")
+    outputs  = [_out(video_path, f"{stem}_seg.csv"),
+                _out(video_path, f"{stem}_contour_radii.npy"),
+                sentinel]
     if dye_click is not None:
-        outputs.append(_out(video_path, f"{stem}_track.csv"))
+        outputs.insert(-1, _out(video_path, f"{stem}_track.csv"))
     return Task(
         name        = "SAM2 segmentation",
         fn          = _run_sam2_task,
@@ -180,6 +191,7 @@ def make_sam2_task(
             delete_frames  = delete_frames,
             dye_click      = dye_click,
             image_size     = image_size,
+            sentinel_path  = sentinel,
         ),
     )
 
@@ -191,6 +203,7 @@ def _run_cotracker_task(
     dye_click:   tuple[int, int],
     stride:      int,
     chunk_size:  int,
+    sentinel_path: Path | None = None,               # written only on successful completion
     render_annotated_s: float = 0.0,   # 0 = skip render; >0 = render first N seconds
     progress_callback: Callable | None = None,
     cancel_event:      threading.Event | None = None,
@@ -221,10 +234,19 @@ def _run_cotracker_task(
         cancel_event=cancel_event,
     )
 
+    # Do not write partial outputs if the run was cancelled
+    if cancel_event and cancel_event.is_set():
+        cap.release()
+        return
+
     OUTPUTS_DIR.mkdir(exist_ok=True)
     write_csv(track_csv, tracks, visible, fps, stride)
 
-    if render_annotated_s > 0 and not (cancel_event and cancel_event.is_set()):
+    # Sentinel written immediately after CSV — before optional render
+    if sentinel_path is not None:
+        sentinel_path.touch()
+
+    if render_annotated_s > 0:
         if progress_callback:
             progress_callback(total_raw, total_raw, "Rendering tracked video...")
         max_strided = int(render_annotated_s * fps / stride)
@@ -244,20 +266,22 @@ def make_cotracker_task(
     chunk_size: int   = 400,
     render_annotated_s: float = 0.0,   # 0 = skip render; >0 = first N seconds only
 ) -> Task:
-    stem = _stem(video_path)
+    stem     = _stem(video_path)
+    sentinel = _out(video_path, f"{stem}_cotrack.complete")
     return Task(
         name        = "CoTracker tracking",
         fn          = _run_cotracker_task,
         deps        = [],               # independent of SAM2
         resource    = "gpu",
         inputs      = [video_path],
-        outputs     = [_out(video_path, f"{stem}_track.csv")],
+        outputs     = [_out(video_path, f"{stem}_track.csv"), sentinel],
         weight      = 3.0,
         task_kwargs = dict(
             video_path          = video_path,
             dye_click           = dye_click,
             stride              = stride,
             chunk_size          = chunk_size,
+            sentinel_path       = sentinel,
             render_annotated_s  = render_annotated_s,
         ),
     )

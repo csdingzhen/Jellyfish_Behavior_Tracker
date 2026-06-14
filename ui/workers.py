@@ -134,8 +134,8 @@ def _delete_cached_outputs(
         return
     stem = video_path.stem
 
-    sam2_files = [f"{stem}_seg.csv", f"{stem}_contour_radii.npy"]
-    cotrack_files = [f"{stem}_track.csv"]
+    sam2_files = [f"{stem}_seg.csv", f"{stem}_contour_radii.npy", f"{stem}_sam2.complete"]
+    cotrack_files = [f"{stem}_track.csv", f"{stem}_cotrack.complete"]
     analysis_files = [
         f"{stem}_margin_diff.npy",
         f"{stem}_initiation_b.csv",
