@@ -9,6 +9,9 @@ venv/
 # Environment secrets
 .env
 
+# Local user preferences (contains machine-specific paths)
+user_settings.json
+
 # System
 .DS_Store
 Thumbs.db

@@ -34,6 +34,21 @@ from src.scheduler import Task
 from config import OUTPUTS_DIR, SAM2_WEIGHTS, COTRACKER_WEIGHTS
 
 
+# ── Output directory (runtime override) ──────────────────────────────────────
+
+_output_root_override: Path | None = None
+
+
+def set_output_root(path: Path | None) -> None:
+    """Override the output directory at runtime (called by the UI)."""
+    global _output_root_override
+    _output_root_override = path
+
+
+def get_output_root() -> Path:
+    return _output_root_override if _output_root_override is not None else OUTPUTS_DIR
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _stem(video_path: Path) -> str:
@@ -43,12 +58,12 @@ def _stem(video_path: Path) -> str:
 def run_dir(video_path: Path, output_root: Path | None = None) -> Path:
     """
     Return the per-recording output directory.
-    Default: <OUTPUTS_DIR>/<video_stem>/
+    Default: <OUTPUTS_DIR>/<video_stem>/  (overrideable via set_output_root)
 
     All task outputs live inside this folder so recordings never pollute
     each other's files.  The UI can display one folder per recording.
     """
-    root = output_root or OUTPUTS_DIR
+    root = output_root or get_output_root()
     d    = root / video_path.stem
     d.mkdir(parents=True, exist_ok=True)
     return d
@@ -239,7 +254,7 @@ def _run_cotracker_task(
         cap.release()
         return
 
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    get_output_root().mkdir(parents=True, exist_ok=True)
     write_csv(track_csv, tracks, visible, fps, stride)
 
     # Sentinel written immediately after CSV — before optional render
@@ -380,7 +395,7 @@ def _run_phase1b_task(
     frame_indices = np.arange(len(lab_diff)) * stride
     body_diff     = apply_body_frame_rotation(lab_diff, dye, seg, stride, frame_indices)
 
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    get_output_root().mkdir(parents=True, exist_ok=True)
     np.save(str(body_npy), body_diff)
 
     if progress_callback:
@@ -492,7 +507,7 @@ def _run_analysis_task(
                               f"Pulse {pid}: R{rhop_id} dist={rhop_dist:.1f}°")
 
     # Save CSV
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    get_output_root().mkdir(parents=True, exist_ok=True)
     if results:
         with open(init_csv, "w", newline="") as f:
             w = _csv.DictWriter(f, fieldnames=list(results[0].keys()))

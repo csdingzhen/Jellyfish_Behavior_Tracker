@@ -59,8 +59,8 @@ from .tasks import (
     make_phase1b_task,
     make_analysis_task,
     run_dir,
+    get_output_root,
 )
-from config import OUTPUTS_DIR
 
 
 # ── Result container ──────────────────────────────────────────────────────────
@@ -150,7 +150,7 @@ def run_pipeline(
         cancel_event = threading.Event()
     ct_stride = cotracker_stride if cotracker_stride is not None else stride
 
-    OUTPUTS_DIR.mkdir(exist_ok=True)
+    get_output_root().mkdir(parents=True, exist_ok=True)
     stem = video_path.stem
 
     # Assemble task graph

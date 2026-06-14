@@ -26,9 +26,30 @@ from qtpy.QtWidgets import (
     QFileDialog, QLineEdit, QComboBox, QMessageBox,
 )
 
-_RECENT_FILE = Path.home() / ".cassiopea_recent.json"
-_MAX_RECENT  = 5
-CALIB_DIR    = Path(__file__).parent.parent / "calibration"
+_RECENT_FILE  = Path.home() / ".cassiopea_recent.json"
+_MAX_RECENT   = 5
+CALIB_DIR     = Path(__file__).parent.parent / "calibration"
+PROJECT_DIR   = Path(__file__).parent.parent / "project_folder"
+
+
+def _safe_stem(name: str) -> str:
+    """Make a Windows-safe filename stem from a project name."""
+    bad = r'\/:*?"<>|'
+    return ("".join("_" if c in bad else c for c in name).strip()) or "Untitled"
+
+
+def _unique_project_path(name: str) -> Path:
+    """Return a non-conflicting .cassiopea.json path inside PROJECT_DIR."""
+    PROJECT_DIR.mkdir(exist_ok=True)
+    stem = _safe_stem(name)
+    path = PROJECT_DIR / f"{stem}.cassiopea.json"
+    if not path.exists():
+        return path
+    for i in range(2, 1000):
+        path = PROJECT_DIR / f"{stem}_{i}.cassiopea.json"
+        if not path.exists():
+            return path
+    return path   # fallback (will overwrite _999)
 
 
 # ── Project state dataclass ───────────────────────────────────────────────────
@@ -262,21 +283,14 @@ class ProjectBar(QWidget):
         state = dlg.get_state()
         if state is None:
             return
-
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save project as…",
-            str(Path.home() / f"{state.name}.cassiopea.json"),
-            "Cassiopea project (*.cassiopea.json *.json)",
-        )
-        if not path:
-            return
-
-        state.save(Path(path))
+        # Auto-save to project_folder/ — no file dialog needed
+        path = _unique_project_path(state.name)
+        state.save(path)
         self._apply(state)
 
     def _on_open(self):
-        recent = load_recent()
-        start  = str(Path(recent[0]).parent) if recent else str(Path.home())
+        # Default to project_folder/ so users see their projects immediately
+        start = str(PROJECT_DIR) if PROJECT_DIR.exists() else str(Path.home())
         path, _ = QFileDialog.getOpenFileName(
             self, "Open project", start,
             "Cassiopea project (*.cassiopea.json *.json)",
@@ -292,14 +306,9 @@ class ProjectBar(QWidget):
         if self._project is None:
             return
         if self._project._path is None:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save project as…",
-                str(Path.home() / f"{self._project.name}.cassiopea.json"),
-                "Cassiopea project (*.cassiopea.json *.json)",
-            )
-            if not path:
-                return
-            self._project.save(Path(path))
+            # Shouldn't happen with auto-save in _on_new, but handle gracefully
+            path = _unique_project_path(self._project.name)
+            self._project.save(path)
         else:
             self._project.save()
 

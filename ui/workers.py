@@ -128,8 +128,8 @@ def _delete_cached_outputs(
     rerun_analysis: bool = True,
 ) -> None:
     """Remove selected cached outputs so the chosen pipeline stages rerun."""
-    from config import OUTPUTS_DIR
-    rdir = OUTPUTS_DIR / video_path.stem
+    from src.tasks import run_dir
+    rdir = run_dir(video_path)
     if not rdir.exists():
         return
     stem = video_path.stem

@@ -28,6 +28,7 @@ from qtpy.QtWidgets import (
     QProgressBar,
     QMessageBox,
     QCheckBox,
+    QLineEdit,
 )
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QPixmap, QImage
@@ -35,7 +36,24 @@ from qtpy.QtGui import QPixmap, QImage
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CALIB_DIR = Path(__file__).parent.parent / "calibration"
+CALIB_DIR         = Path(__file__).parent.parent / "calibration"
+_USER_SETTINGS    = Path(__file__).parent.parent / "user_settings.json"
+
+
+def _load_user_settings() -> dict:
+    if _USER_SETTINGS.exists():
+        try:
+            return json.loads(_USER_SETTINGS.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_user_settings(data: dict) -> None:
+    try:
+        _USER_SETTINGS.write_text(json.dumps(data, indent=2))
+    except Exception:
+        pass
 
 
 def _fmt_time(seconds: float) -> str:
@@ -134,6 +152,32 @@ class ProcessingTab(QWidget):
         param_layout = QVBoxLayout(param_box)
         self._build_param_panel(param_layout)
         layout.addWidget(param_box)
+
+        # ── Output directory ──────────────────────────────────────────────────
+        out_box = QGroupBox("Output directory")
+        out_layout = QHBoxLayout(out_box)
+        from config import OUTPUTS_DIR
+        saved_dir = _load_user_settings().get("output_dir")
+        self._output_dir = Path(saved_dir) if saved_dir else OUTPUTS_DIR
+        self._out_dir_edit = QLineEdit(str(self._output_dir))
+        self._out_dir_edit.setReadOnly(True)
+        self._out_dir_edit.setToolTip(
+            "Pipeline outputs (CSVs, masks, plots) are written here.\n"
+            f"Default: {OUTPUTS_DIR}"
+        )
+        out_browse_btn = QPushButton("Browse…")
+        out_browse_btn.setFixedWidth(70)
+        out_browse_btn.clicked.connect(self._on_browse_output_dir)
+        out_reset_btn = QPushButton("Reset")
+        out_reset_btn.setFixedWidth(50)
+        out_reset_btn.setToolTip(f"Reset to default: {OUTPUTS_DIR}")
+        out_reset_btn.clicked.connect(self._on_reset_output_dir)
+        out_layout.addWidget(self._out_dir_edit)
+        out_layout.addWidget(out_browse_btn)
+        out_layout.addWidget(out_reset_btn)
+        layout.addWidget(out_box)
+        # Apply any saved override immediately so tasks use it from startup
+        self._apply_output_dir(self._output_dir)
 
         # ── Per-task recompute + Run ──────────────────────────────────────────
         recompute_box = QGroupBox("Recompute (force re-run)")
@@ -496,6 +540,35 @@ class ProcessingTab(QWidget):
         w.returned.connect(_on_preview_done)
         w.errored.connect(_on_preview_error)
         w.start()
+
+    # ── Output directory ──────────────────────────────────────────────────────
+
+    def _apply_output_dir(self, path: Path) -> None:
+        from src.tasks import set_output_root
+        from config import OUTPUTS_DIR
+        set_output_root(None if path == OUTPUTS_DIR else path)
+
+    def _on_browse_output_dir(self):
+        chosen = QFileDialog.getExistingDirectory(
+            self, "Select output directory", str(self._output_dir)
+        )
+        if not chosen:
+            return
+        self._output_dir = Path(chosen)
+        self._out_dir_edit.setText(str(self._output_dir))
+        self._apply_output_dir(self._output_dir)
+        data = _load_user_settings()
+        data["output_dir"] = str(self._output_dir)
+        _save_user_settings(data)
+
+    def _on_reset_output_dir(self):
+        from config import OUTPUTS_DIR
+        self._output_dir = OUTPUTS_DIR
+        self._out_dir_edit.setText(str(OUTPUTS_DIR))
+        self._apply_output_dir(OUTPUTS_DIR)
+        data = _load_user_settings()
+        data.pop("output_dir", None)
+        _save_user_settings(data)
 
     # ── Run pipeline ──────────────────────────────────────────────────────────
 

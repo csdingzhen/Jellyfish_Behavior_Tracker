@@ -449,7 +449,7 @@ def run_sam2_streaming(
                     str(win_dir),
                     offload_video_to_cpu=True,
                     offload_state_to_cpu=True,
-                    async_loading_frames=True,
+                    async_loading_frames=False,  # sync loading avoids race conditions on Windows
                 )
 
                 if prev_mask is None:
@@ -477,20 +477,28 @@ def run_sam2_streaming(
                 local_masks:     dict[int, np.ndarray] = {}
                 local_dye_masks: dict[int, np.ndarray] = {}
 
-                for local_idx, obj_ids, logits in tqdm(
-                    predictor.propagate_in_video(state, max_frame_num_to_track=n),
-                    total=n,
-                    desc=f"  SAM2 win {win_idx + 1}",
-                    unit="fr",
-                    leave=False,
-                ):
-                    id_list = list(obj_ids)
-                    if 1 in id_list:
-                        local_masks[local_idx] = (
-                            logits[id_list.index(1), 0] > 0.0).cpu().numpy()
-                    if dye_click is not None and 2 in id_list:
-                        local_dye_masks[local_idx] = (
-                            logits[id_list.index(2), 0] > 0.0).cpu().numpy()
+                try:
+                    for local_idx, obj_ids, logits in tqdm(
+                        predictor.propagate_in_video(state, max_frame_num_to_track=n),
+                        total=n,
+                        desc=f"  SAM2 win {win_idx + 1}",
+                        unit="fr",
+                        leave=False,
+                    ):
+                        if cancel_event is not None and cancel_event.is_set():
+                            break
+                        id_list = list(obj_ids)
+                        if 1 in id_list:
+                            local_masks[local_idx] = (
+                                logits[id_list.index(1), 0] > 0.0).cpu().numpy()
+                        if dye_click is not None and 2 in id_list:
+                            local_dye_masks[local_idx] = (
+                                logits[id_list.index(2), 0] > 0.0).cpu().numpy()
+                except (AttributeError, RuntimeError) as _err:
+                    # SAM2 generator cleanup can raise when we break early on cancel.
+                    # Re-raise only if this is not a cancel-induced exit.
+                    if not (cancel_event and cancel_event.is_set()):
+                        raise
 
             # ── Collect stats (same logic as run_sam2) ────────────────────────
             for local_idx in range(n):

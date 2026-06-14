@@ -28,8 +28,8 @@ You should see your GPU and driver version. The CUDA version shown must be ≥ 1
 ## Step 1 — Clone the repository
 
 ```powershell
-git clone https://github.com/<your-org>/Jellyfish.git
-cd Jellyfish
+git clone https://github.com/csdingzhen/Jellyfish_Behavior_Tracker.git
+cd Jellyfish_Behavior_Tracker
 ```
 
 ---
@@ -62,7 +62,7 @@ Setup complete.
 
 ## Step 3 — Configure paths
 
-Open `config.py` and set `VIDEO_DIR` to wherever your recordings are stored:
+Open `config.py` and set `VIDEO_DIR` to wherever your recordings are stored, for example:
 
 ```python
 VIDEO_DIR = Path(r"D:\LabData\Cassiopea\recordings")
@@ -90,7 +90,7 @@ Or verify via CLI:
 
 ---
 
-## Manual installation (if setup.ps1 fails)
+## Manual installation (only do this if setup.ps1 fails)
 
 If the automated script fails, install each component manually:
 
@@ -248,3 +248,5 @@ Or alternatively:
 | `outputs/` | No (.gitignore) | Pipeline results; can be regenerated |
 | `data/` | No (.gitignore) | Raw video clips |
 | `venv/` | No (.gitignore) | Virtual environment |
+| `assets/` | Yes | Resource related to UI |
+| `docs/` | Yes | Knowledge base for developer or LLM agents |
