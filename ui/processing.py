@@ -503,6 +503,8 @@ class ProcessingTab(QWidget):
             if not ret:
                 return None
 
+            from hydra.core.global_hydra import GlobalHydra
+            GlobalHydra.instance().clear()
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
             sam2_model = build_sam2(SAM2_CONFIG, str(SAM2_WEIGHTS))
@@ -515,6 +517,7 @@ class ProcessingTab(QWidget):
                     point_labels=np.array([1]),
                     multimask_output=False,
                 )
+            GlobalHydra.instance().clear()   # clean up so pipeline can reinit
             return masks[0].astype(np.uint8)
 
         w = _preview_worker()

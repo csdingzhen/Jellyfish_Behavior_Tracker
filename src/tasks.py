@@ -119,6 +119,13 @@ def _run_sam2_task(
 
     from sam2.build_sam import build_sam2_video_predictor
     from config import SAM2_CONFIG
+    # Clear Hydra's global state before building the predictor.
+    # The SAM2 preview (build_sam2 for single-frame annotation) initialises Hydra
+    # in the same process; calling build_sam2_video_predictor afterwards without
+    # clearing it raises HydraException: "GlobalHydra is already initialized".
+    from hydra.core.global_hydra import GlobalHydra
+    GlobalHydra.instance().clear()
+
     device    = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     overrides = [f"++model.image_size={image_size}"] if image_size else []
     predictor = build_sam2_video_predictor(
@@ -172,6 +179,18 @@ def _run_sam2_task(
         progress_callback(n_strided, n_strided, "SAM2 complete")
 
 
+def _migrate_sentinel(sentinel: Path, data_outputs: list[Path], video_path: Path) -> None:
+    """Write sentinel for a pre-existing complete run that predates the sentinel system."""
+    if sentinel.exists():
+        return
+    try:
+        video_mtime = video_path.stat().st_mtime
+        if all(p.exists() and p.stat().st_mtime >= video_mtime for p in data_outputs):
+            sentinel.touch()
+    except OSError:
+        pass
+
+
 def make_sam2_task(
     video_path:   Path,
     bell_click:   tuple[int, int],
@@ -184,11 +203,12 @@ def make_sam2_task(
 ) -> Task:
     stem     = _stem(video_path)
     sentinel = _out(video_path, f"{stem}_sam2.complete")
-    outputs  = [_out(video_path, f"{stem}_seg.csv"),
-                _out(video_path, f"{stem}_contour_radii.npy"),
-                sentinel]
+    data_out = [_out(video_path, f"{stem}_seg.csv"),
+                _out(video_path, f"{stem}_contour_radii.npy")]
     if dye_click is not None:
-        outputs.insert(-1, _out(video_path, f"{stem}_track.csv"))
+        data_out.append(_out(video_path, f"{stem}_track.csv"))
+    _migrate_sentinel(sentinel, data_out, video_path)
+    outputs  = data_out + [sentinel]
     return Task(
         name        = "SAM2 segmentation",
         fn          = _run_sam2_task,
@@ -283,13 +303,15 @@ def make_cotracker_task(
 ) -> Task:
     stem     = _stem(video_path)
     sentinel = _out(video_path, f"{stem}_cotrack.complete")
+    track_csv = _out(video_path, f"{stem}_track.csv")
+    _migrate_sentinel(sentinel, [track_csv], video_path)
     return Task(
         name        = "CoTracker tracking",
         fn          = _run_cotracker_task,
         deps        = [],               # independent of SAM2
         resource    = "gpu",
         inputs      = [video_path],
-        outputs     = [_out(video_path, f"{stem}_track.csv"), sentinel],
+        outputs     = [track_csv, sentinel],
         weight      = 3.0,
         task_kwargs = dict(
             video_path          = video_path,

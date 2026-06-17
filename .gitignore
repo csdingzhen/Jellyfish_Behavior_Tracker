@@ -43,10 +43,8 @@ weights/
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
-# Calibration — keep JSON and annotated PNGs (small, scientifically important)
-# Only exclude raw hi-res source images if they are large
-calibration/*.tiff
-calibration/*.tif
+# Calibration — stored locally only, not committed to the repo
+calibration/
 
 # Project Record - New/Open/Save feature using JSON files
 project_folder/
