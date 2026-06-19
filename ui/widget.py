@@ -19,6 +19,7 @@ from qtpy.QtCore import Qt, QTimer
 
 from .project import ProjectBar
 from .hardware import HardwareWidget
+from .style import STYLESHEET
 
 
 class CassiopeaWidget(QWidget):
@@ -38,9 +39,13 @@ class CassiopeaWidget(QWidget):
         self._build_ui()
 
     def _build_ui(self):
+        self.setStyleSheet(STYLESHEET)
+        # Keep the outer container transparent so napari's dock background
+        # shows through instead of creating a black-box effect.
+        self.setAttribute(Qt.WA_StyledBackground, False)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
-        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Project bar at the very top
         self.project_bar = ProjectBar()

@@ -23,21 +23,29 @@ from qtpy.QtWidgets import (
     QLabel,
     QComboBox,
     QFileDialog,
-    QGroupBox,
     QTextEdit,
     QProgressBar,
     QMessageBox,
     QCheckBox,
     QLineEdit,
+    QScrollArea,
+    QFrame,
 )
 from qtpy.QtCore import Qt
-from qtpy.QtGui import QPixmap, QImage
+from qtpy.QtGui import QPixmap
 
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-CALIB_DIR         = Path(__file__).parent.parent / "calibration"
-_USER_SETTINGS    = Path(__file__).parent.parent / "user_settings.json"
+from .style import (
+    card, step_badge, status_icon, _set_icon_color,
+    C_TEXT, C_TEXT_DIM, C_TEXT_MONO,
+    C_GREEN, C_RED, C_BLUE, C_ORANGE, C_GRAY, C_BORDER_LO,
+    C_CARD_ALT, C_BORDER, _ARROW_SVG,
+)
+
+CALIB_DIR      = Path(__file__).parent.parent / "calibration"
+_USER_SETTINGS = Path(__file__).parent.parent / "user_settings.json"
 
 
 def _load_user_settings() -> dict:
@@ -61,6 +69,15 @@ def _fmt_time(seconds: float) -> str:
     h, s = divmod(s, 3600)
     m, s = divmod(s, 60)
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
+_TASK_NAMES = [
+    "SAM2 segmentation",
+    "CoTracker tracking",
+    "Margin diff (lab frame)",
+    "Body-frame rotation",
+    "Pulse initiation analysis",
+]
 
 
 class ProcessingTab(QWidget):
@@ -100,88 +117,124 @@ class ProcessingTab(QWidget):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(6)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # ── Current video label ───────────────────────────────────────────────
-        self._video_label = QLabel("No video selected")
-        self._video_label.setStyleSheet("color: #aaa; font-style: italic;")
-        self._video_label.setWordWrap(True)
-        layout.addWidget(self._video_label)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
-        # ── Calibration picker ────────────────────────────────────────────────
-        calib_box = QGroupBox("Calibration")
-        calib_layout = QHBoxLayout(calib_box)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # ── Error banner (hidden by default) ─────────────────────────────────
+        self._error_banner = self._make_error_banner()
+        self._error_banner.setVisible(False)
+        layout.addWidget(self._error_banner)
+
+        # ── Video info card ───────────────────────────────────────────────────
+        vid_card = card()
+        vc_lay = vid_card.layout()
+        self._video_name_lbl = QLabel("No video selected")
+        self._video_name_lbl.setStyleSheet(
+            f"font-weight: bold; color: {C_TEXT}; font-size: 13px;"
+        )
+        self._video_name_lbl.setWordWrap(True)
+        self._video_meta_lbl = QLabel("")
+        self._video_meta_lbl.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 11px;")
+        vc_lay.addWidget(self._video_name_lbl)
+        vc_lay.addWidget(self._video_meta_lbl)
+        layout.addWidget(vid_card)
+
+        # ── Step 1 – Calibration ──────────────────────────────────────────────
+        s1_card = card()
+        self._add_step_header(s1_card.layout(), 1, "Calibration")
+        calib_row = QHBoxLayout()
         self.calib_combo = QComboBox()
-        self.calib_combo.setMinimumWidth(160)
+        self.calib_combo.setMinimumWidth(130)
         self.calib_combo.currentIndexChanged.connect(self._on_calib_selected)
-        refresh_calib_btn = QPushButton("Refresh")
-        refresh_calib_btn.clicked.connect(self._refresh_calibrations)
-        calib_layout.addWidget(QLabel("Calibration:"))
-        calib_layout.addWidget(self.calib_combo)
-        calib_layout.addWidget(refresh_calib_btn)
-        layout.addWidget(calib_box)
+        refresh_btn = QPushButton("Refresh")
+        calib_row.addWidget(self.calib_combo, stretch=1)
+        calib_row.addWidget(refresh_btn)
+        refresh_btn.clicked.connect(self._refresh_calibrations)
+        s1_card.layout().addLayout(calib_row)
+        layout.addWidget(s1_card)
         self._refresh_calibrations()
 
-        # ── Bell / Dye annotation ─────────────────────────────────────────────
-        ann_box = QGroupBox("Click annotation")
-        ann_layout = QVBoxLayout(ann_box)
+        # ── Step 2 – Annotation ───────────────────────────────────────────────
+        s2_card = card()
+        self._add_step_header(s2_card.layout(), 2, "Mark positions on first frame")
+        s2_card.layout().setSpacing(8)
+        s2_card.layout().addLayout(
+            self._annotation_row("Bell", C_RED, self._start_bell_click, "bell")
+        )
+        s2_card.layout().addLayout(
+            self._annotation_row("Dye", C_GREEN, self._start_dye_click, "dye")
+        )
+        layout.addWidget(s2_card)
 
-        bell_row = QHBoxLayout()
-        self.bell_btn = QPushButton("Mark bell")
-        self.bell_btn.setToolTip("Click on the jellyfish bell in the viewer")
-        self.bell_btn.clicked.connect(self._start_bell_click)
-        self.bell_coord_label = QLabel("—")
-        bell_row.addWidget(self.bell_btn)
-        bell_row.addWidget(self.bell_coord_label)
-        ann_layout.addLayout(bell_row)
+        # ── Step 3 – Parameters ───────────────────────────────────────────────
+        s3_card = card()
+        self._add_step_header(s3_card.layout(), 3, "Configure parameters")
+        self._build_param_panel(s3_card.layout())
+        layout.addWidget(s3_card)
 
-        dye_row = QHBoxLayout()
-        self.dye_btn = QPushButton("Mark dye")
-        self.dye_btn.setToolTip("Click on the dye mark in the viewer")
-        self.dye_btn.clicked.connect(self._start_dye_click)
-        self.dye_coord_label = QLabel("—")
-        dye_row.addWidget(self.dye_btn)
-        dye_row.addWidget(self.dye_coord_label)
-        ann_layout.addLayout(dye_row)
-
-        layout.addWidget(ann_box)
-
-        # ── Parameters ────────────────────────────────────────────────────────
-        param_box = QGroupBox("Parameters")
-        param_layout = QVBoxLayout(param_box)
-        self._build_param_panel(param_layout)
-        layout.addWidget(param_box)
-
-        # ── Output directory ──────────────────────────────────────────────────
-        out_box = QGroupBox("Output directory")
-        out_layout = QHBoxLayout(out_box)
+        # ── Output directory card ─────────────────────────────────────────────
+        out_card = card()
+        out_card_lay = out_card.layout()
+        out_hdr = QLabel("Output directory")
+        out_hdr.setStyleSheet(
+            f"font-weight: bold; font-size: 12px; color: {C_TEXT};"
+        )
+        out_card_lay.addWidget(out_hdr)
+        out_row = QHBoxLayout()
         from config import OUTPUTS_DIR
         saved_dir = _load_user_settings().get("output_dir")
         self._output_dir = Path(saved_dir) if saved_dir else OUTPUTS_DIR
         self._out_dir_edit = QLineEdit(str(self._output_dir))
         self._out_dir_edit.setReadOnly(True)
         self._out_dir_edit.setToolTip(
-            "Pipeline outputs (CSVs, masks, plots) are written here.\n"
+            f"Pipeline outputs (CSVs, masks, plots) are written here.\n"
             f"Default: {OUTPUTS_DIR}"
         )
         out_browse_btn = QPushButton("Browse…")
-        out_browse_btn.setFixedWidth(70)
+        out_browse_btn.setMinimumWidth(76)
         out_browse_btn.clicked.connect(self._on_browse_output_dir)
         out_reset_btn = QPushButton("Reset")
-        out_reset_btn.setFixedWidth(50)
+        out_reset_btn.setMinimumWidth(60)
         out_reset_btn.setToolTip(f"Reset to default: {OUTPUTS_DIR}")
         out_reset_btn.clicked.connect(self._on_reset_output_dir)
-        out_layout.addWidget(self._out_dir_edit)
-        out_layout.addWidget(out_browse_btn)
-        out_layout.addWidget(out_reset_btn)
-        layout.addWidget(out_box)
-        # Apply any saved override immediately so tasks use it from startup
-        self._apply_output_dir(self._output_dir)
+        out_row.addWidget(self._out_dir_edit, stretch=1)
+        out_row.addWidget(out_browse_btn)
+        out_row.addWidget(out_reset_btn)
+        out_card_lay.addLayout(out_row)
+        layout.addWidget(out_card)
 
-        # ── Per-task recompute + Run ──────────────────────────────────────────
-        recompute_box = QGroupBox("Recompute (force re-run)")
-        recompute_layout = QHBoxLayout(recompute_box)
+        # ── Run / Cancel ──────────────────────────────────────────────────────
+        run_row = QHBoxLayout()
+        self.run_btn = QPushButton("Run pipeline")
+        self.run_btn.setObjectName("runBtn")
+        self.run_btn.clicked.connect(self._on_run)
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setObjectName("cancelBtn")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setFixedWidth(80)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        run_row.addWidget(self.run_btn, stretch=1)
+        run_row.addWidget(self.cancel_btn)
+        layout.addLayout(run_row)
+
+        # ── Recompute row (below Run button) ──────────────────────────────────
+        rerun_row = QHBoxLayout()
+        rerun_row.setContentsMargins(4, 0, 4, 0)
+        rerun_lbl = QLabel("Force recompute:")
+        rerun_lbl.setStyleSheet(
+            f"color: {C_TEXT_DIM}; font-size: 11px;"
+        )
         self.rerun_sam2_cb = QCheckBox("SAM2")
         self.rerun_sam2_cb.setToolTip(
             "Re-run SAM2 segmentation even if cached outputs exist.\n"
@@ -196,90 +249,218 @@ class ProcessingTab(QWidget):
             "Re-run margin diff, body-frame rotation and pulse initiation analysis\n"
             "even if cached analysis outputs exist."
         )
-        recompute_layout.addWidget(self.rerun_sam2_cb)
-        recompute_layout.addWidget(self.rerun_cotrack_cb)
-        recompute_layout.addWidget(self.rerun_analysis_cb)
-        recompute_layout.addStretch()
-        layout.addWidget(recompute_box)
+        rerun_row.addWidget(rerun_lbl)
+        rerun_row.addWidget(self.rerun_sam2_cb)
+        rerun_row.addWidget(self.rerun_cotrack_cb)
+        rerun_row.addWidget(self.rerun_analysis_cb)
+        rerun_row.addStretch()
+        layout.addLayout(rerun_row)
 
-        run_row = QHBoxLayout()
-        self.run_btn = QPushButton("Run pipeline")
-        self.run_btn.setStyleSheet(
-            "background: #224488; font-weight: bold; padding: 6px;"
-        )
-        self.run_btn.clicked.connect(self._on_run)
-        self.cancel_btn = QPushButton("Cancel")
-        self.cancel_btn.setEnabled(False)
-        self.cancel_btn.clicked.connect(self._on_cancel)
-        run_row.addWidget(self.run_btn)
-        run_row.addWidget(self.cancel_btn)
-        layout.addLayout(run_row)
+        # ── Progress card ─────────────────────────────────────────────────────
+        prog_card = card(padding=10)
+        prog_lay = prog_card.layout()
 
-        # ── Progress ──────────────────────────────────────────────────────────
-        progress_box = QGroupBox("Progress")
-        progress_layout = QVBoxLayout(progress_box)
+        hdr_row = QHBoxLayout()
+        prog_hdr = QLabel("Progress")
+        prog_hdr.setStyleSheet(f"font-weight: bold; font-size: 12px; color: {C_TEXT};")
+        self._overall_label = QLabel("")
+        self._overall_label.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 11px;")
+        self._overall_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        hdr_row.addWidget(prog_hdr)
+        hdr_row.addWidget(self._overall_label, stretch=1)
+        prog_lay.addLayout(hdr_row)
 
-        TASK_NAMES = [
-            "SAM2 segmentation",
-            "CoTracker tracking",
-            "Margin diff (lab frame)",
-            "Body-frame rotation",
-            "Pulse initiation analysis",
-        ]
-        self._progress_bars:   dict[str, QProgressBar] = {}
-        self._progress_labels: dict[str, QLabel]       = {}
-        for name in TASK_NAMES:
+        self._task_icons:        dict[str, QLabel] = {}
+        self._task_status_labels: dict[str, QLabel] = {}
+        self._task_start_times:  dict[str, float | None] = {n: None for n in _TASK_NAMES}
+
+        # compat refs used by _reset_progress / _on_cancel_reset legacy paths
+        self._progress_bars:   dict[str, QLabel] = {}
+        self._progress_labels: dict[str, QLabel] = {}
+
+        for name in _TASK_NAMES:
             row = QHBoxLayout()
-            lbl = QLabel(name[:28])
-            lbl.setFixedWidth(200)
-            bar = QProgressBar()
-            bar.setRange(0, 100)
-            bar.setValue(0)
-            bar.setTextVisible(True)
-            status_lbl = QLabel("pending")
-            status_lbl.setFixedWidth(80)
-            row.addWidget(lbl)
-            row.addWidget(bar)
-            row.addWidget(status_lbl)
-            progress_layout.addLayout(row)
-            self._progress_bars[name]   = bar
-            self._progress_labels[name] = status_lbl
+            row.setSpacing(8)
+            icon = status_icon(C_GRAY)
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet(f"color: {C_TEXT}; font-size: 12px;")
+            stat_lbl = QLabel("Waiting")
+            stat_lbl.setStyleSheet(
+                f"color: {C_TEXT_DIM}; font-size: 11px; min-width: 90px;"
+            )
+            stat_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            row.addWidget(icon)
+            row.addWidget(name_lbl, stretch=1)
+            row.addWidget(stat_lbl)
+            prog_lay.addLayout(row)
+            self._task_icons[name]          = icon
+            self._task_status_labels[name]  = stat_lbl
+            self._progress_bars[name]       = icon      # compat (not a QProgressBar)
+            self._progress_labels[name]     = stat_lbl
 
-        self.overall_bar = QProgressBar()
-        self.overall_bar.setRange(0, 100)
-        self.overall_bar.setValue(0)
-        self.overall_bar.setFormat("Overall: %p%")
-        progress_layout.addWidget(self.overall_bar)
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet(f"color: {C_BORDER_LO};")
+        prog_lay.addWidget(sep)
 
         self._timer_label = QLabel("")
         self._timer_label.setAlignment(Qt.AlignCenter)
-        self._timer_label.setStyleSheet("color: #888; font-size: 10px;")
+        self._timer_label.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 10px;")
         self._timer_label.setVisible(False)
-        progress_layout.addWidget(self._timer_label)
+        prog_lay.addWidget(self._timer_label)
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setMaximumHeight(100)
-        self.log_area.setPlaceholderText("Pipeline log…")
-        progress_layout.addWidget(self.log_area)
+        self.log_area.setMaximumHeight(80)
+        self.log_area.setStyleSheet(
+            f"font-size: 10px; font-family: monospace; color: {C_TEXT_DIM};"
+        )
+        self.log_area.setPlaceholderText("Log output…")
+        prog_lay.addWidget(self.log_area)
 
-        layout.addWidget(progress_box)
+        # invisible overall bar — kept so existing code paths can setValue without error
+        self.overall_bar = QProgressBar()
+        self.overall_bar.setRange(0, 100)
+        self.overall_bar.setVisible(False)
+        prog_lay.addWidget(self.overall_bar)
 
-        # ── Results ───────────────────────────────────────────────────────────
-        result_box = QGroupBox("Results")
-        result_layout = QVBoxLayout(result_box)
+        layout.addWidget(prog_card)
+
+        # ── Results card ──────────────────────────────────────────────────────
+        res_card = card(padding=10)
+        res_lay = res_card.layout()
+        res_hdr = QLabel("Results")
+        res_hdr.setStyleSheet(f"font-weight: bold; font-size: 12px; color: {C_TEXT};")
+        res_lay.addWidget(res_hdr)
         self.result_label = QLabel("No results yet.")
         self.result_label.setWordWrap(True)
-        result_layout.addWidget(self.result_label)
-
+        self.result_label.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 11px;")
+        res_lay.addWidget(self.result_label)
         self.result_plot_label = QLabel()
         self.result_plot_label.setAlignment(Qt.AlignCenter)
-        result_layout.addWidget(self.result_plot_label)
-        layout.addWidget(result_box)
+        res_lay.addWidget(self.result_plot_label)
+        layout.addWidget(res_card)
+
+        layout.addStretch()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        self._apply_output_dir(self._output_dir)
+
+    # ── UI helpers ────────────────────────────────────────────────────────────
+
+    def _add_step_header(self, lay: "QVBoxLayout", number: int, title: str) -> None:
+        """Prepend a numbered step badge + title row to an existing card layout."""
+        hdr = QHBoxLayout()
+        hdr.addWidget(step_badge(number))
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(
+            f"font-weight: bold; color: {C_TEXT}; font-size: 12px;"
+        )
+        hdr.addWidget(title_lbl)
+        hdr.addStretch()
+        lay.addLayout(hdr)
+
+    def _annotation_row(
+        self, label: str, color: str, click_fn, attr: str
+    ) -> QHBoxLayout:
+        """Colored dot · label · coordinate text · Mark button."""
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        dot = QLabel("●")
+        dot.setFixedWidth(14)
+        dot.setStyleSheet(f"color: {color}; font-size: 16px;")
+
+        name_lbl = QLabel(label)
+        name_lbl.setFixedWidth(36)
+        name_lbl.setStyleSheet(
+            f"color: {C_TEXT}; font-weight: bold; font-size: 12px;"
+        )
+
+        coord_lbl = QLabel("—")
+        coord_lbl.setStyleSheet(
+            f"font-family: monospace; color: {C_TEXT_MONO}; font-size: 11px;"
+        )
+
+        mark_btn = QPushButton("Mark")
+        mark_btn.setFixedWidth(70)
+        mark_btn.clicked.connect(click_fn)
+
+        row.addWidget(dot)
+        row.addWidget(name_lbl)
+        row.addWidget(coord_lbl, stretch=1)
+        row.addWidget(mark_btn)
+
+        if attr == "bell":
+            self.bell_btn         = mark_btn
+            self.bell_coord_label = coord_lbl
+        else:
+            self.dye_btn         = mark_btn
+            self.dye_coord_label = coord_lbl
+
+        return row
+
+    def _make_error_banner(self) -> QFrame:
+        f = QFrame()
+        f.setStyleSheet("""
+            QFrame {
+                background: #2a1010;
+                border: 1px solid #5a2020;
+                border-radius: 6px;
+            }
+        """)
+        lay = QVBoxLayout(f)
+        lay.setContentsMargins(10, 8, 10, 8)
+        lay.setSpacing(4)
+
+        top_row = QHBoxLayout()
+        icon_lbl = QLabel("⚠")
+        icon_lbl.setStyleSheet(f"color: {C_RED}; font-size: 16px;")
+        icon_lbl.setFixedWidth(20)
+        self._error_title = QLabel("Pipeline error")
+        self._error_title.setStyleSheet(
+            f"color: {C_RED}; font-weight: bold; font-size: 12px;"
+        )
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(20, 20)
+        close_btn.setStyleSheet(
+            "background: transparent; border: none; color: #777; font-size: 12px;"
+        )
+        close_btn.clicked.connect(lambda: f.setVisible(False))
+        top_row.addWidget(icon_lbl)
+        top_row.addWidget(self._error_title, stretch=1)
+        top_row.addWidget(close_btn)
+        lay.addLayout(top_row)
+
+        self._error_msg = QLabel("")
+        self._error_msg.setStyleSheet(
+            "color: #cc8888; font-size: 11px; font-family: monospace;"
+        )
+        self._error_msg.setWordWrap(True)
+        lay.addWidget(self._error_msg)
+
+        btn_row = QHBoxLayout()
+        retry_btn = QPushButton("Retry SAM2")
+        retry_btn.setObjectName("retryBtn")
+        retry_btn.setFixedHeight(26)
+        retry_btn.clicked.connect(self._on_retry_sam2)
+        viewlog_btn = QPushButton("View log ↓")
+        viewlog_btn.setFixedHeight(26)
+        viewlog_btn.clicked.connect(
+            lambda: self.log_area.setVisible(True)
+        )
+        btn_row.addWidget(retry_btn)
+        btn_row.addWidget(viewlog_btn)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        return f
 
     def _build_param_panel(self, parent_layout):
         """Simple form built from PipelineParams dataclass fields."""
-        from magicgui.widgets import Container, SpinBox, FloatSpinBox, ComboBox
+        from magicgui.widgets import Container, SpinBox, FloatSpinBox
         from .parameters import PipelineParams, Sam2Model
 
         self._params = PipelineParams()
@@ -344,31 +525,74 @@ class ProcessingTab(QWidget):
                 "spurious detections; lower it to catch weak pulses."
             ),
         )
+        # ── SAM2 model — native QComboBox (magicgui's ComboBox renders incorrectly) ──
+        sam2_row = QHBoxLayout()
+        sam2_row.setContentsMargins(0, 2, 0, 4)
+        sam2_row.setSpacing(8)
+        sam2_lbl = QLabel("SAM2 model")
+        sam2_lbl.setStyleSheet(f"color: {C_TEXT}; background: transparent; font-size: 12px;")
 
-        sam2_model_w = ComboBox(
-            label="SAM2 model",
-            choices=[e.value for e in Sam2Model],
-            value=self._params.sam2_model.value,
-            tooltip=(
-                "SAM2 backbone size. 'tiny' runs fastest and fits in 8 GB VRAM;\n"
-                "'large' is more accurate but needs more memory and time.\n"
-                "For Cassiopea's high-contrast bell, 'tiny' is usually sufficient."
-            ),
+        self._sam2_model_combo = QComboBox()
+        self._sam2_model_combo.setToolTip(
+            "SAM2 backbone size. 'tiny' runs fastest and fits in 8 GB VRAM;\n"
+            "'large' is more accurate but needs more memory and time.\n"
+            "For Cassiopea's high-contrast bell, 'tiny' is usually sufficient."
         )
-        sam2_model_w.changed.connect(
-            lambda v: setattr(self._params, "sam2_model", Sam2Model(v))
+        for bare, desc in [
+            ("tiny",  "tiny — fastest, recommended"),
+            ("small", "small — slight accuracy gain"),
+            ("base",  "base — use if tiny shows drift"),
+            ("large", "large — highest accuracy, slowest"),
+        ]:
+            self._sam2_model_combo.addItem(desc, userData=bare)
+        for i in range(self._sam2_model_combo.count()):
+            if self._sam2_model_combo.itemData(i) == self._params.sam2_model.value:
+                self._sam2_model_combo.setCurrentIndex(i)
+                break
+        self._sam2_model_combo.currentIndexChanged.connect(
+            lambda _: setattr(
+                self._params, "sam2_model",
+                Sam2Model(self._sam2_model_combo.currentData())
+            )
         )
+        sam2_row.addWidget(sam2_lbl)
+        sam2_row.addWidget(self._sam2_model_combo, stretch=1)
+        parent_layout.addLayout(sam2_row)
 
         container = Container(widgets=[
-            stride_w, ct_stride_w, sam2_model_w,
+            stride_w, ct_stride_w,
             pre_window_w, inner_frac_w, outer_frac_w, prominence_w,
         ])
+        container.native.setObjectName("paramContainer")
+        container.native.setStyleSheet(f"""
+            QWidget {{ background: transparent; }}
+            QSpinBox, QDoubleSpinBox, QLineEdit {{
+                background: {C_CARD_ALT};
+                border: 1px solid {C_BORDER};
+                border-radius: 5px;
+                color: {C_TEXT};
+                padding: 3px 6px;
+            }}
+            QLabel {{ color: {C_TEXT}; background: transparent; }}
+            QPushButton {{
+                color: {C_TEXT};
+                background: transparent;
+                border: none;
+                font-weight: 600;
+            }}
+            QPushButton:disabled {{ color: {C_TEXT_DIM}; }}
+            QSpinBox::up-button, QDoubleSpinBox::up-button,
+            QSpinBox::down-button, QDoubleSpinBox::down-button {{
+                color: {C_TEXT};
+            }}
+        """)
         parent_layout.addWidget(container.native)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load_video(self, path: Path):
         """Load *path* into the viewer as the current working video."""
+        import cv2
         from .thumbnails import read_first_frame
         frame = read_first_frame(path)
         if frame is None:
@@ -376,8 +600,24 @@ class ProcessingTab(QWidget):
             return
 
         self._video_path = path
-        self._video_label.setText(path.name)
-        self._video_label.setStyleSheet("color: #dddddd;")
+        self._video_name_lbl.setText(path.name)
+        self._video_name_lbl.setStyleSheet(
+            f"font-weight: bold; color: {C_TEXT}; font-size: 13px;"
+        )
+
+        try:
+            cap    = cv2.VideoCapture(str(path))
+            fps    = cap.get(cv2.CAP_PROP_FPS)
+            n_fr   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            w_px   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h_px   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            dur    = n_fr / fps if fps > 0 else 0.0
+            self._video_meta_lbl.setText(
+                f"{w_px}×{h_px}  ·  {fps:.0f} fps  ·  {_fmt_time(dur)}  ·  {n_fr} frames"
+            )
+        except Exception:
+            self._video_meta_lbl.setText("")
 
         self.viewer.layers.clear()
         self._frame_layer = None
@@ -395,7 +635,6 @@ class ProcessingTab(QWidget):
 
     def on_project_changed(self, state) -> None:
         """Called when the active project changes (from ProjectBar)."""
-        # Auto-select calibration from the project
         if state.calibration:
             calib_path = Path(state.calibration)
             for i in range(self.calib_combo.count()):
@@ -444,7 +683,7 @@ class ProcessingTab(QWidget):
         row, col = data[-1]
         self._bell_click = (int(col), int(row))
         self.bell_coord_label.setText(
-            f"x={self._bell_click[0]}  y={self._bell_click[1]}"
+            f"{self._bell_click[0]}, {self._bell_click[1]}"
         )
         if len(data) > 1:
             self._bell_layer.data = data[[-1]]
@@ -472,7 +711,7 @@ class ProcessingTab(QWidget):
         row, col = data[-1]
         self._dye_click = (int(col), int(row))
         self.dye_coord_label.setText(
-            f"x={self._dye_click[0]}  y={self._dye_click[1]}"
+            f"{self._dye_click[0]}, {self._dye_click[1]}"
         )
         if len(data) > 1:
             self._dye_layer.data = data[[-1]]
@@ -486,15 +725,14 @@ class ProcessingTab(QWidget):
 
         bell = self._bell_click
         video_path = self._video_path
-
         self._log("SAM2 preview: running segmentation on frame 0…")
 
         from napari.qt.threading import thread_worker
 
         @thread_worker
         def _preview_worker():
-            import torch
             import cv2 as cv
+            import torch
             from config import SAM2_WEIGHTS, SAM2_CONFIG
 
             cap = cv.VideoCapture(str(video_path))
@@ -517,7 +755,7 @@ class ProcessingTab(QWidget):
                     point_labels=np.array([1]),
                     multimask_output=False,
                 )
-            GlobalHydra.instance().clear()   # clean up so pipeline can reinit
+            GlobalHydra.instance().clear()
             return masks[0].astype(np.uint8)
 
         w = _preview_worker()
@@ -577,30 +815,31 @@ class ProcessingTab(QWidget):
 
     def _on_run(self):
         if self._video_path is None:
-            QMessageBox.warning(self, "No video", "Select a video from the sidebar first.")
+            QMessageBox.warning(self, "No video",
+                                "Select a video from the sidebar first.")
             return
         if self._bell_click is None:
             QMessageBox.warning(self, "No bell click",
-                                "Click 'Mark bell' and click the bell in the viewer.")
+                                "Click 'Mark' next to Bell and click the bell in the viewer.")
             return
         if self._dye_click is None:
             QMessageBox.warning(self, "No dye click",
-                                "Click 'Mark dye' and click the dye mark in the viewer.")
+                                "Click 'Mark' next to Dye and click the dye mark in the viewer.")
             return
         if self._calib_path is None or not self._calib_path.exists():
             QMessageBox.warning(self, "No calibration",
                                 "Select a calibration file, or run Workflow A first.")
             return
 
-        rerun_sam2    = self.rerun_sam2_cb.isChecked()
-        rerun_cotrack = self.rerun_cotrack_cb.isChecked()
+        rerun_sam2     = self.rerun_sam2_cb.isChecked()
+        rerun_cotrack  = self.rerun_cotrack_cb.isChecked()
         rerun_analysis = self.rerun_analysis_cb.isChecked()
         any_rerun = rerun_sam2 or rerun_cotrack or rerun_analysis
 
         if any_rerun:
             parts = []
-            if rerun_sam2:    parts.append("SAM2")
-            if rerun_cotrack: parts.append("CoTracker")
+            if rerun_sam2:     parts.append("SAM2")
+            if rerun_cotrack:  parts.append("CoTracker")
             if rerun_analysis: parts.append("Analysis")
             reply = QMessageBox.warning(
                 self, "Force recompute",
@@ -609,6 +848,8 @@ class ProcessingTab(QWidget):
                 QMessageBox.Yes | QMessageBox.Cancel,
             )
             if reply != QMessageBox.Yes:
+                # uncheck so the retry button can call _on_run cleanly next time
+                self.rerun_sam2_cb.setChecked(False)
                 return
 
         self._reset_progress()
@@ -643,30 +884,86 @@ class ProcessingTab(QWidget):
         self._log("Cancellation requested…")
         self.cancel_btn.setEnabled(False)
 
+    def _on_retry_sam2(self):
+        """Force-rerun SAM2 and restart the pipeline."""
+        self._error_banner.setVisible(False)
+        self.rerun_sam2_cb.setChecked(True)
+        self._on_run()
+
     # ── Progress updates ──────────────────────────────────────────────────────
 
     def _reset_progress(self):
-        for bar in self._progress_bars.values():
-            bar.setValue(0)
-        for lbl in self._progress_labels.values():
-            lbl.setText("pending")
+        for icon in self._task_icons.values():
+            _set_icon_color(icon, C_GRAY)
+        for lbl in self._task_status_labels.values():
+            lbl.setText("Waiting")
+            lbl.setStyleSheet(
+                f"color: {C_TEXT_DIM}; font-size: 11px; min-width: 90px;"
+            )
         self.overall_bar.setValue(0)
+        self._overall_label.setText("")
         self._timer_label.setVisible(False)
         self._run_start_time = None
+        self._task_start_times = {n: None for n in _TASK_NAMES}
         self.log_area.clear()
         self.result_label.setText("Running…")
         self.result_plot_label.clear()
+        self._error_banner.setVisible(False)
 
     def _on_progress_event(self, event):
         name = event.task_name
-        if name in self._progress_bars:
-            pct = int(event.fraction * 100)
-            self._progress_bars[name].setValue(pct)
-            self._progress_labels[name].setText(event.status.name.lower())
+        if name in self._task_icons:
+            status = event.status.name.upper()
+            icon     = self._task_icons[name]
+            stat_lbl = self._task_status_labels[name]
+
+            if status == "RUNNING":
+                _set_icon_color(icon, C_BLUE)
+                if self._task_start_times[name] is None:
+                    self._task_start_times[name] = time.monotonic()
+                msg = (event.message or "Running…")[:32]
+                stat_lbl.setText(msg)
+                stat_lbl.setStyleSheet(
+                    f"color: {C_BLUE}; font-size: 11px; min-width: 90px;"
+                )
+            elif status in ("DONE", "SKIPPED"):
+                _set_icon_color(icon, C_GREEN)
+                t0 = self._task_start_times.get(name)
+                elapsed_s = f" · {_fmt_time(time.monotonic() - t0)}" if t0 else ""
+                text = "Skipped" if status == "SKIPPED" else f"Done{elapsed_s}"
+                stat_lbl.setText(text)
+                stat_lbl.setStyleSheet(
+                    f"color: {C_GREEN}; font-size: 11px; min-width: 90px;"
+                )
+            elif status == "FAILED":
+                _set_icon_color(icon, C_RED)
+                stat_lbl.setText("Failed")
+                stat_lbl.setStyleSheet(
+                    f"color: {C_RED}; font-size: 11px; min-width: 90px;"
+                )
+                self._error_title.setText(f"{name} failed")
+                self._error_msg.setText(event.message or "See log for details.")
+                self._error_banner.setVisible(True)
+            elif status == "CANCELLED":
+                _set_icon_color(icon, C_GRAY)
+                stat_lbl.setText("Cancelled")
+                stat_lbl.setStyleSheet(
+                    f"color: {C_TEXT_DIM}; font-size: 11px; min-width: 90px;"
+                )
+            elif status == "WAITING":
+                _set_icon_color(icon, C_GRAY)
+                stat_lbl.setText("Waiting")
+                stat_lbl.setStyleSheet(
+                    f"color: {C_TEXT_DIM}; font-size: 11px; min-width: 90px;"
+                )
+
             if event.message:
                 self._log(f"[{name}] {event.message}")
+
         overall = event.overall_fraction
         self.overall_bar.setValue(int(overall * 100))
+        if overall > 0:
+            self._overall_label.setText(f"{int(overall * 100)}%")
 
         if self._run_start_time is not None:
             elapsed = time.monotonic() - self._run_start_time
@@ -697,16 +994,27 @@ class ProcessingTab(QWidget):
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self._on_cancel_reset()
-        self._log(f"Pipeline error: {exc_info[1]}")
-        self.result_label.setText(f"Error: {exc_info[1]}")
+        msg = str(exc_info[1])
+        self._log(f"Pipeline error: {msg}")
+        self.result_label.setText(f"Error: {msg}")
+        self._error_title.setText("Pipeline error")
+        self._error_msg.setText(msg[:200])
+        self._error_banner.setVisible(True)
 
     def _on_cancel_reset(self):
-        """Reset all progress bars to zero after a cancel or failure."""
-        for bar in self._progress_bars.values():
-            bar.setValue(0)
-        for lbl in self._progress_labels.values():
-            lbl.setText("—")
+        """Reset any still-running tasks to '—'; preserve Done/Skipped tasks."""
+        for name, icon in self._task_icons.items():
+            lbl = self._task_status_labels[name]
+            current = lbl.text()
+            # Only reset tasks that weren't successfully finished
+            if current not in ("Done", "Skipped") and not current.startswith("Done ·"):
+                _set_icon_color(icon, C_GRAY)
+                lbl.setText("—")
+                lbl.setStyleSheet(
+                    f"color: {C_TEXT_DIM}; font-size: 11px; min-width: 90px;"
+                )
         self.overall_bar.setValue(0)
+        self._overall_label.setText("")
         elapsed = (time.monotonic() - self._run_start_time
                    if self._run_start_time else 0.0)
         self._timer_label.setText(f"Cancelled after {_fmt_time(elapsed)}")
@@ -715,7 +1023,6 @@ class ProcessingTab(QWidget):
     # ── Results display ───────────────────────────────────────────────────────
 
     def _load_results(self, result):
-        stem  = self._video_path.stem
         lines = ["Results loaded:"]
 
         if result.track_csv and result.track_csv.exists():

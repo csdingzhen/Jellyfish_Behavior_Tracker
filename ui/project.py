@@ -259,8 +259,15 @@ class ProjectBar(QWidget):
         self._save_btn = QPushButton("Save")
         self._save_btn.setEnabled(False)
 
+        _bar_btn_style = (
+            "QPushButton { padding: 3px 8px; font-size: 11px; min-height: 22px; }"
+            "QPushButton:hover { background: #333; }"
+            "QPushButton:pressed { background: #1e1e1e; }"
+            "QPushButton:disabled { color: #444; }"
+        )
         for btn in (self._new_btn, self._open_btn, self._save_btn):
-            btn.setFixedWidth(48)
+            btn.setFixedWidth(52)
+            btn.setStyleSheet(_bar_btn_style)
 
         self._name_lbl = QLabel("No project")
         self._name_lbl.setStyleSheet("font-weight: bold; color: #aaddff;")

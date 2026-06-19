@@ -28,12 +28,13 @@ import numpy as np
 from qtpy.QtCore import Qt, QTimer
 from qtpy.QtWidgets import (
     QFileDialog,
-    QGroupBox,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -48,6 +49,13 @@ from src.calibration_core import (
     build_calibration,
     save_annotated_image,
     write_calibration_json,
+)
+from .style import (
+    add_step_header,
+    card,
+    C_BLUE,
+    C_TEXT_DIM,
+    C_TEXT_MONO,
 )
 
 CALIB_DIR = Path(__file__).parent.parent / "calibration"
@@ -100,79 +108,109 @@ class CalibrationTab(QWidget):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setSpacing(6)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # Status label
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # ── Stage progress header ─────────────────────────────────────────────
         self.status_label = QLabel(self.STAGE_LABELS[0])
         self.status_label.setWordWrap(True)
-        self.status_label.setStyleSheet("font-weight: bold; color: #aaddff;")
+        self.status_label.setStyleSheet(
+            f"font-weight: bold; color: {C_BLUE}; font-size: 12px; padding: 2px 0;"
+        )
         layout.addWidget(self.status_label)
 
-        # Image picker
-        img_box = QGroupBox("Image")
-        img_layout = QHBoxLayout(img_box)
+        # ── Card 1: Load image ────────────────────────────────────────────────
+        c1 = card()
+        add_step_header(c1.layout(), 1, "Load image")
+
+        img_row = QHBoxLayout()
         self.img_path_edit = QLineEdit()
         self.img_path_edit.setPlaceholderText("Select a .png / .jpg image…")
         self.img_path_edit.setReadOnly(True)
         self.browse_btn = QPushButton("Browse…")
+        self.browse_btn.setMinimumWidth(76)
         self.browse_btn.clicked.connect(self._browse_image)
-        img_layout.addWidget(self.img_path_edit)
-        img_layout.addWidget(self.browse_btn)
-        layout.addWidget(img_box)
+        img_row.addWidget(self.img_path_edit, stretch=1)
+        img_row.addWidget(self.browse_btn)
+        c1.layout().addLayout(img_row)
 
-        # Animal name
-        name_box = QGroupBox("Animal name")
-        name_layout = QHBoxLayout(name_box)
+        name_row = QHBoxLayout()
+        name_lbl = QLabel("Animal name")
+        name_lbl.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 11px;")
+        name_lbl.setFixedWidth(90)
         self.name_edit = QLineEdit()
         self.name_edit.setPlaceholderText("e.g. Ethel_Cain")
-        name_layout.addWidget(self.name_edit)
-        layout.addWidget(name_box)
+        name_row.addWidget(name_lbl)
+        name_row.addWidget(self.name_edit, stretch=1)
+        c1.layout().addLayout(name_row)
 
-        # Annotation controls
-        ann_box = QGroupBox("Annotation")
-        ann_layout = QVBoxLayout(ann_box)
+        layout.addWidget(c1)
+
+        # ── Card 2: Mark bell centre + dye position ───────────────────────────
+        c2 = card()
+        add_step_header(c2.layout(), 2, "Mark bell centre and dye position")
+
+        coord_row = QHBoxLayout()
+        coord_static = QLabel("Last click:")
+        coord_static.setStyleSheet(f"color: {C_TEXT_DIM}; font-size: 11px;")
+        self.coord_label = QLabel("—")
+        self.coord_label.setStyleSheet(
+            f"color: {C_TEXT_MONO}; font-size: 11px; font-family: monospace;"
+        )
+        coord_row.addWidget(coord_static)
+        coord_row.addWidget(self.coord_label, stretch=1)
+        c2.layout().addLayout(coord_row)
 
         self.next_btn = QPushButton("Next →")
         self.next_btn.setEnabled(False)
         self.next_btn.clicked.connect(self._on_next)
+        c2.layout().addWidget(self.next_btn)
+
+        layout.addWidget(c2)
+
+        # ── Card 3: Click rhopalia ────────────────────────────────────────────
+        c3 = card()
+        add_step_header(c3.layout(), 3, "Click rhopalia")
 
         self.undo_btn = QPushButton("Remove last rhopalium")
         self.undo_btn.setEnabled(False)
         self.undo_btn.clicked.connect(self._on_undo)
+        c3.layout().addWidget(self.undo_btn)
 
-        coord_row = QHBoxLayout()
-        coord_row.addWidget(QLabel("Last click:"))
-        self.coord_label = QLabel("—")
-        coord_row.addWidget(self.coord_label)
-        coord_row.addStretch()
-
-        ann_layout.addWidget(self.next_btn)
-        ann_layout.addWidget(self.undo_btn)
-        ann_layout.addLayout(coord_row)
-        layout.addWidget(ann_box)
-
-        # Live angle table
-        table_box = QGroupBox("Rhopalium angles (body frame)")
-        table_layout = QVBoxLayout(table_box)
         self.angle_table = QTableWidget(0, 3)
         self.angle_table.setHorizontalHeaderLabels(["#", "phi_body (°)", "px (x,y)"])
         self.angle_table.horizontalHeader().setStretchLastSection(True)
-        self.angle_table.setMaximumHeight(220)
+        self.angle_table.setMaximumHeight(200)
         self.angle_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        table_layout.addWidget(self.angle_table)
-        layout.addWidget(table_box)
+        c3.layout().addWidget(self.angle_table)
 
-        # Save
+        layout.addWidget(c3)
+
+        # ── Card 4: Save ──────────────────────────────────────────────────────
+        c4 = card()
+        add_step_header(c4.layout(), 4, "Save calibration")
         self.save_btn = QPushButton("Save calibration")
+        self.save_btn.setObjectName("runBtn")
         self.save_btn.setEnabled(False)
-        self.save_btn.setStyleSheet(
-            "background: #226622; font-weight: bold; padding: 6px;"
-        )
         self.save_btn.clicked.connect(self._on_save)
-        layout.addWidget(self.save_btn)
+        c4.layout().addWidget(self.save_btn)
+
+        layout.addWidget(c4)
 
         layout.addStretch()
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
         self._update_controls()
 
     # ── Layer polling (replaces events.data) ──────────────────────────────────
@@ -234,8 +272,8 @@ class CalibrationTab(QWidget):
         try:
             self._rhop_layer.text = {
                 "string": [f"R{i}" for i in range(n)],
-                "color": "white",
-                "size": 10,
+                "color": "green",
+                "size": 14,
             }
         except Exception:
             pass   # text labels are cosmetic; don't crash if API differs
