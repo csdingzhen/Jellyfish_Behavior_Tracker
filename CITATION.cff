@@ -6,7 +6,8 @@ abstract: >-
   jellyfish) that extracts bell orientation, contraction timing, and pulse
   initiation site (which rhopalium triggers each contraction wave).
 authors:
-  - name: "yhhua"
+  - given-names: "Yuhan"
+    family-names: "Hua"
 repository-code: "https://github.com/csdingzhen/Jellyfish_Behavior_Tracker"
 license: MIT
 date-released: "2026-06-18"
