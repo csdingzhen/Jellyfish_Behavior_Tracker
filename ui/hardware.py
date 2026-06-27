@@ -90,8 +90,11 @@ class HardwareWidget(QWidget):
         row.setContentsMargins(12, 0, 12, 0)
         row.setSpacing(8)
 
-        self._auto_queue_cb = QCheckBox()
-        self._auto_queue_cb.setToolTip("Auto-queue new recordings when detected")
+        self._auto_queue_cb = QCheckBox("Auto-queue")
+        self._auto_queue_cb.setToolTip(
+            "When checked, newly detected recordings in the video sidebar\n"
+            "are queued for processing automatically."
+        )
         self._auto_queue_cb.toggled.connect(self.auto_queue_changed)
         row.addWidget(self._auto_queue_cb)
 
@@ -143,9 +146,12 @@ class HardwareWidget(QWidget):
             return
         try:
             import torch
-            used  = torch.cuda.memory_allocated(0) / 1e9
-            total = self._hw.gpu_vram_gb
-            used  = min(used, total)
+            # mem_get_info queries the driver directly for free/total bytes on
+            # the whole device — matches nvidia-smi / Task Manager, unlike
+            # memory_allocated() which only sees this process's own tensors.
+            free_b, total_b = torch.cuda.mem_get_info(0)
+            used  = (total_b - free_b) / 1e9
+            total = total_b / 1e9
             pct   = used / total * 100 if total > 0 else 0
             color = C_RED if pct > 85 else C_ORANGE if pct > 60 else C_TEXT_DIM
             self._vram_lbl.setStyleSheet(f"color: {color}; font-size: 11px;")

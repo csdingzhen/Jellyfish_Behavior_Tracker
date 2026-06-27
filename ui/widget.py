@@ -26,7 +26,7 @@ class CassiopeaWidget(QWidget):
     """
     Top-level dock widget with:
       - ProjectBar (New / Open / Save + project name label)
-      - HardwareWidget (collapsible GPU status + auto-queue toggle)
+      - HardwareWidget (compact GPU status bar + auto-queue toggle)
       - Two lazy tabs: Calibrate and Process
     """
 
