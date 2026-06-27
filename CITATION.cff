@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software in your research, please cite it as below."
+title: "Cassiopea Behavior Analysis Pipeline"
+abstract: >-
+  A video analysis pipeline for top-view recordings of Cassiopea (upside-down
+  jellyfish) that extracts bell orientation, contraction timing, and pulse
+  initiation site (which rhopalium triggers each contraction wave).
+authors:
+  - name: "yhhua"
+repository-code: "https://github.com/csdingzhen/Jellyfish_Behavior_Tracker"
+license: MIT
+date-released: "2026-06-18"
+keywords:
+  - jellyfish
+  - Cassiopea
+  - neuroethology
+  - computer-vision
+  - behavior-analysis
+  - SAM2
+  - CoTracker
