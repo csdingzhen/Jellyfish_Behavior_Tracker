@@ -28,13 +28,18 @@ STABLE_CHECKS = 3       # must see same size 3× → ~9 s before "ready"
 
 
 class VideoStatus(Enum):
-    UNKNOWN    = "unknown"
-    RECORDING  = "recording"   # file exists but still growing / locked
-    QUEUED     = "queued"      # waiting for GPU to be free
-    PROCESSING = "processing"  # pipeline running
-    DONE       = "done"        # pipeline completed successfully
-    FAILED     = "failed"      # pipeline raised an error
-    SKIPPED    = "skipped"     # user manually removed from queue
+    UNKNOWN      = "unknown"
+    RECORDING    = "recording"     # file exists but still growing / locked
+    QUEUED       = "queued"        # waiting for GPU to be free
+    PROCESSING   = "processing"    # pipeline running
+    DONE         = "done"          # pipeline completed successfully
+    FAILED       = "failed"        # pipeline raised an error for this video
+    SKIPPED      = "skipped"       # user manually removed from queue
+    NEEDS_INPUT  = "needs_input"   # blocked on missing project setup
+                                    # (no calibration / no bell+dye click yet)
+                                    # — does NOT auto-advance the queue, since
+                                    # the same cause would repeat for every
+                                    # remaining video
 
 
 def _is_locked(path: Path) -> bool:

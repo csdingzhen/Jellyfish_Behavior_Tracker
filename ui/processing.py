@@ -31,7 +31,7 @@ from qtpy.QtWidgets import (
     QScrollArea,
     QFrame,
 )
-from qtpy.QtCore import Qt
+from qtpy.QtCore import Qt, Signal
 from qtpy.QtGui import QPixmap
 
 import sys
@@ -92,7 +92,18 @@ class ProcessingTab(QWidget):
       4. Parameter panel
       5. Run → progress display
       6. Results loaded automatically on completion
+
+    Signals
+    -------
+    pipeline_finished(Path, object) — emitted after every manual run started
+    from this tab (i.e. via the "Run pipeline" button, not the sidebar
+    queue). Second arg is the PipelineResult on success, or None on
+    failure/error. app.py listens for this to keep the sidebar's status dot
+    in sync and to propagate continuity clicks to the next queued video,
+    since a manual run otherwise bypasses both of those.
     """
+
+    pipeline_finished = Signal(Path, object)
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
@@ -105,6 +116,16 @@ class ProcessingTab(QWidget):
         self._cancel_event:   threading.Event | None = None
         self._worker          = None
         self._run_start_time: float | None = None
+        self._project_state   = None   # set via on_project_changed()
+
+        # Re-entrancy guards: assigning layer.data inside an events.data
+        # handler re-fires events.data synchronously. In napari 0.7.0 the
+        # re-entrant read still sees the pre-assignment point count, so the
+        # "keep only the last point" trim below would recurse forever
+        # ("maximum recursion depth exceeded"). These flags suppress the
+        # handler during our own programmatic data edits.
+        self._suppress_bell_event = False
+        self._suppress_dye_event  = False
 
         # napari layer handles
         self._frame_layer = None
@@ -635,6 +656,7 @@ class ProcessingTab(QWidget):
 
     def on_project_changed(self, state) -> None:
         """Called when the active project changes (from ProjectBar)."""
+        self._project_state = state
         if state.calibration:
             calib_path = Path(state.calibration)
             for i in range(self.calib_combo.count()):
@@ -673,20 +695,35 @@ class ProcessingTab(QWidget):
                 symbol="cross", size=20,
             )
             self._bell_layer.events.data.connect(self._on_bell_data)
+        # Re-marking means "replace the old point": clear any existing point
+        # so exactly one bell marker ever exists. Guarded so this clear does
+        # not re-enter _on_bell_data.
+        self._suppress_bell_event = True
+        self._bell_layer.data = []
+        self._suppress_bell_event = False
+        self._bell_click = None
+        self.bell_coord_label.setText("—")
         self._bell_layer.mode = "add"
         self.viewer.layers.selection.active = self._bell_layer
 
-    def _on_bell_data(self, event):
+    def _on_bell_data(self, event=None):
+        if self._suppress_bell_event:
+            return
         data = self._bell_layer.data
         if len(data) == 0:
             return
+        # Keep only the most recent point. Suppress the handler while we do
+        # this so the re-fired events.data does not recurse.
+        if len(data) > 1:
+            self._suppress_bell_event = True
+            self._bell_layer.data = data[[-1]]
+            self._suppress_bell_event = False
+            data = self._bell_layer.data
         row, col = data[-1]
         self._bell_click = (int(col), int(row))
         self.bell_coord_label.setText(
             f"{self._bell_click[0]}, {self._bell_click[1]}"
         )
-        if len(data) > 1:
-            self._bell_layer.data = data[[-1]]
         self._bell_layer.mode = "pan_zoom"
         self._run_sam2_preview()
 
@@ -701,20 +738,32 @@ class ProcessingTab(QWidget):
                 symbol="disc", size=16,
             )
             self._dye_layer.events.data.connect(self._on_dye_data)
+        # Re-marking means "replace the old point": clear any existing point
+        # so exactly one dye marker ever exists. Guarded against re-entry.
+        self._suppress_dye_event = True
+        self._dye_layer.data = []
+        self._suppress_dye_event = False
+        self._dye_click = None
+        self.dye_coord_label.setText("—")
         self._dye_layer.mode = "add"
         self.viewer.layers.selection.active = self._dye_layer
 
-    def _on_dye_data(self, event):
+    def _on_dye_data(self, event=None):
+        if self._suppress_dye_event:
+            return
         data = self._dye_layer.data
         if len(data) == 0:
             return
+        if len(data) > 1:
+            self._suppress_dye_event = True
+            self._dye_layer.data = data[[-1]]
+            self._suppress_dye_event = False
+            data = self._dye_layer.data
         row, col = data[-1]
         self._dye_click = (int(col), int(row))
         self.dye_coord_label.setText(
             f"{self._dye_click[0]}, {self._dye_click[1]}"
         )
-        if len(data) > 1:
-            self._dye_layer.data = data[[-1]]
         self._dye_layer.mode = "pan_zoom"
 
     # ── SAM2 preview ──────────────────────────────────────────────────────────
@@ -985,10 +1034,12 @@ class ProcessingTab(QWidget):
             self._timer_label.setText(f"Completed in {_fmt_time(elapsed)}")
             self._log("Pipeline completed successfully.")
             self._load_results(result)
+            self.pipeline_finished.emit(self._video_path, result)
         else:
             self._on_cancel_reset()
             self._log("Pipeline failed or was cancelled.")
             self.result_label.setText("Pipeline failed — check log.")
+            self.pipeline_finished.emit(self._video_path, None)
 
     def _on_pipeline_error(self, exc_info):
         self.run_btn.setEnabled(True)
@@ -1000,6 +1051,7 @@ class ProcessingTab(QWidget):
         self._error_title.setText("Pipeline error")
         self._error_msg.setText(msg[:200])
         self._error_banner.setVisible(True)
+        self.pipeline_finished.emit(self._video_path, None)
 
     def _on_cancel_reset(self):
         """Reset any still-running tasks to '—'; preserve Done/Skipped tasks."""

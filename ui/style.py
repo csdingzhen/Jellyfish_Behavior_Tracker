@@ -173,6 +173,45 @@ QComboBox QAbstractItemView {{
     outline: none;
 }}
 
+/* ── List widget (video sidebar) ─────────────────────────────────────────── */
+QListWidget {{
+    background: {C_BG};
+    border: 1px solid {C_BORDER};
+    border-radius: 6px;
+    outline: none;
+}}
+QListWidget::item {{
+    border: none;
+    border-bottom: 1px solid {C_BORDER_LO};
+}}
+QListWidget::item:selected {{
+    background: #2a3d5c;
+}}
+QListWidget::item:hover:!selected {{
+    background: #242424;
+}}
+
+/* ── Context menu ────────────────────────────────────────────────────────── */
+QMenu {{
+    background: #232323;
+    color: {C_TEXT};
+    border: 1px solid {C_BORDER};
+    padding: 2px;
+}}
+QMenu::item {{
+    padding: 5px 18px;
+    border-radius: 4px;
+}}
+QMenu::item:selected {{
+    background: {C_BLUE};
+    color: #ffffff;
+}}
+QMenu::separator {{
+    height: 1px;
+    background: {C_BORDER};
+    margin: 4px 6px;
+}}
+
 /* ── CheckBox ────────────────────────────────────────────────────────────── */
 QCheckBox {{
     spacing: 6px;

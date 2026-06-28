@@ -393,10 +393,15 @@ scripts\
   validate_tracking.py  Side-by-side validation video generator
 
 ui\
-  app.py           napari viewer setup and dock widget
-  widget.py        Two-tab container (CalibrationTab + ProcessingTab)
+  app.py           napari viewer setup, dock widgets, and cross-widget signal wiring
+  widget.py        Two-tab container (CalibrationTab + ProcessingTab) + hardware/project bars
   calibration.py   Calibration workflow UI
   processing.py    Video processing workflow UI
+  sidebar.py       Video browser / batch queue (left dock) — see UI_GUIDE.md
+  watcher.py       FolderWatcher — detects recordings finishing on disk
+  project.py       ProjectState persistence + continuity-click extraction
+  hardware.py      GPU status bar + auto-queue toggle
+  style.py         Shared dark theme (STYLESHEET) and card/badge widget helpers
   workers.py       Background thread worker and progress relay
   parameters.py    PipelineParams dataclass
   thumbnails.py    Video thumbnail cache helper

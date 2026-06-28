@@ -15,7 +15,7 @@ from qtpy.QtWidgets import (
     QTabWidget,
     QLabel,
 )
-from qtpy.QtCore import Qt, QTimer
+from qtpy.QtCore import Qt, QTimer, Signal
 
 from .project import ProjectBar
 from .hardware import HardwareWidget
@@ -28,7 +28,16 @@ class CassiopeaWidget(QWidget):
       - ProjectBar (New / Open / Save + project name label)
       - HardwareWidget (compact GPU status bar + auto-queue toggle)
       - Two lazy tabs: Calibrate and Process
+
+    Signals
+    -------
+    pipeline_finished(Path, object) — forwarded from ProcessingTab whenever a
+    manual run (started via its own "Run pipeline" button, not the sidebar
+    queue) finishes. app.py listens for this to keep the sidebar status dot
+    and continuity-click propagation in sync for manual runs too.
     """
+
+    pipeline_finished = Signal(Path, object)
 
     def __init__(self, viewer, parent=None):
         super().__init__(parent)
@@ -79,9 +88,15 @@ class CassiopeaWidget(QWidget):
         elif index == 1 and self.process_tab is None:
             from .processing import ProcessingTab
             self.process_tab = ProcessingTab(self.viewer)
+            self.process_tab.pipeline_finished.connect(self.pipeline_finished.emit)
             self.tabs.removeTab(1)
             self.tabs.insertTab(1, self.process_tab, "Process")
             self.tabs.setCurrentIndex(1)
+            # Sync current project state immediately — project_changed may
+            # have already fired (e.g. project opened while still on the
+            # Calibrate tab) before this tab existed to receive it.
+            if self.project_bar.project is not None:
+                self.process_tab.on_project_changed(self.project_bar.project)
             # Deliver any video that was selected before the tab existed
             if self._pending_video is not None:
                 self.process_tab.load_video(self._pending_video)

@@ -130,6 +130,50 @@ All outputs are written to `outputs/<video_stem>/`:
 
 ---
 
+## Video sidebar — batch processing & queue
+
+The left-hand video sidebar is independent of the Process tab's own Run button — it watches a folder, tracks per-video status, and can run an entire batch unattended.
+
+### Two operating modes
+
+**Live recording** — a camera is currently writing new videos into the folder one after another:
+
+1. Click **Browse…** in the sidebar and select the folder.
+2. Toggle **Watch OFF → Watch ON**. The watcher only reacts to files that appear *after* this point — files already in the folder are ignored, so turning Watch on never floods the queue with old recordings.
+3. Tick **Auto-queue** in the hardware bar at the top of the window. New recordings are detected once their file size stops changing for ~9 s, then queued and processed automatically, one at a time.
+4. Manually click bell + dye on the first video only (Process tab). After that completes, the ending bell/dye position becomes the next video's starting guess automatically (continuity) — no further manual annotation needed for the rest of the session.
+
+**Batch of already-recorded videos** — e.g. 24 one-hour clips already sitting in a folder:
+
+1. Browse to the folder (leave Watch off — it only matters for files written after you start watching).
+2. Click **Queue all in folder**. Every video that isn't already queued, processing, or done gets enqueued; they still process strictly one at a time, never two sharing the GPU.
+3. The button changes with queue state: **Remove all from queue** while a batch is actively running (cancels everything still *waiting*; won't interrupt the one already processing — use **Cancel** in the Process tab for that), or **Resume queue** if the queue paused with videos still waiting.
+4. Only the first video needs manual bell/dye annotation; the rest inherit it via continuity. This works **with or without a project open** — annotating and running the first video by hand seeds the continuity used by the rest of the batch.
+
+For a partial batch, multi-select specific videos (Ctrl/Shift-click) and right-click → **Add N to queue**.
+
+### Status dots (left edge of each thumbnail)
+
+| Color  | Status           | Meaning                                                      |
+| ------ | ---------------- | ------------------------------------------------------------ |
+| Gray   | Unknown          | Detected, not yet queued                                     |
+| Orange | Recording        | File still being written                                     |
+| Yellow | Queued           | Waiting for the GPU                                          |
+| Blue   | Processing       | Pipeline running now                                         |
+| Green  | Done             | Completed successfully                                       |
+| Red    | Failed           | This video's run errored, other queued videos are unaffected |
+| Orange | Needs annotation | The batch paused here, see below                             |
+
+### "Needs annotation" — why the queue pauses instead of failing everything
+
+If a video reaches the front of the queue with no bell/dye click available yet (a fresh batch with nothing annotated), every video behind it would hit the exact same problem. Rather than marking the whole batch "Failed" in one shot, only that one video is marked **Needs annotation** and the rest stay quietly **Queued**, untouched.
+
+To resolve: the paused video is loaded automatically into the Process tab. Click **Mark bell** / **Mark dye**, pick a calibration, and **Run pipeline** once. When it finishes, its bell/dye position is captured as the continuity seed and the queue **resumes automatically** — the next waiting video starts on its own, reusing that annotation. (If the queue doesn't pick up for some reason, the sidebar button shows **Resume queue** to kick it manually.)
+
+The same pause applies if no calibration is available.
+
+---
+
 ## Tips and troubleshooting
 
 **The bell click doesn't place a point**  
