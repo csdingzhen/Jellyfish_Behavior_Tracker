@@ -71,6 +71,20 @@ def _fmt_time(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
+def _exc_message(exc_info) -> str:
+    """Extract a human-readable message from a worker error payload.
+
+    napari's @thread_worker `errored` signal emits the Exception object
+    directly (not the (type, value, tb) tuple that sys.exc_info() returns),
+    so indexing it with [1] raises TypeError. Be tolerant of both forms.
+    """
+    if isinstance(exc_info, BaseException):
+        return str(exc_info)
+    if isinstance(exc_info, tuple) and len(exc_info) >= 2:
+        return str(exc_info[1])
+    return str(exc_info)
+
+
 _TASK_NAMES = [
     "SAM2 segmentation",
     "CoTracker tracking",
@@ -126,6 +140,13 @@ class ProcessingTab(QWidget):
         # handler during our own programmatic data edits.
         self._suppress_bell_event = False
         self._suppress_dye_event  = False
+
+        # SAM2 preview is serialized: only one worker at a time, because SAM2
+        # uses Hydra's global singleton and two concurrent previews (e.g. from
+        # re-marking the bell) race on it. _preview_pending records that a
+        # newer mark arrived while a preview was still running.
+        self._preview_worker  = None
+        self._preview_pending = False
 
         # napari layer handles
         self._frame_layer = None
@@ -772,6 +793,16 @@ class ProcessingTab(QWidget):
         if self._bell_click is None or self._video_path is None:
             return
 
+        # Serialize previews. SAM2 builds its model through Hydra's global
+        # singleton, and two preview workers running at once race on
+        # GlobalHydra.instance().clear() → "GlobalHydra is not initialized".
+        # If one is already running (e.g. the user just re-marked the bell),
+        # flag a pending re-run instead of starting a second worker; the
+        # latest self._bell_click is picked up when the current one finishes.
+        if self._preview_worker is not None:
+            self._preview_pending = True
+            return
+
         bell = self._bell_click
         video_path = self._video_path
         self._log("SAM2 preview: running segmentation on frame 0…")
@@ -790,10 +821,14 @@ class ProcessingTab(QWidget):
             if not ret:
                 return None
 
-            from hydra.core.global_hydra import GlobalHydra
-            GlobalHydra.instance().clear()
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
+            from src.tasks import init_sam2_hydra
+            # Clear AND re-initialize Hydra. A plain clear() works only on the
+            # first preview; on re-mark the cached sam2 import doesn't re-run
+            # its one-time Hydra init, so compose() inside build_sam2 raises
+            # "GlobalHydra is not initialized". See init_sam2_hydra().
+            init_sam2_hydra()
             sam2_model = build_sam2(SAM2_CONFIG, str(SAM2_WEIGHTS))
             with torch.inference_mode():
                 img_predictor = SAM2ImagePredictor(sam2_model)
@@ -804,28 +839,41 @@ class ProcessingTab(QWidget):
                     point_labels=np.array([1]),
                     multimask_output=False,
                 )
+            from hydra.core.global_hydra import GlobalHydra
             GlobalHydra.instance().clear()
             return masks[0].astype(np.uint8)
 
         w = _preview_worker()
+        self._preview_worker = w
+
+        def _finish_preview():
+            self._preview_worker = None
+            # If a newer mark arrived mid-run, run it now with the latest click.
+            if self._preview_pending:
+                self._preview_pending = False
+                self._run_sam2_preview()
 
         def _on_preview_done(mask):
-            if mask is None:
-                self._log("SAM2 preview failed.")
-                return
-            if self._mask_layer is not None:
-                try:
-                    self.viewer.layers.remove(self._mask_layer)
-                except Exception:
-                    pass
-            self._mask_layer = self.viewer.add_labels(
-                mask.astype(np.int32), name="Bell mask (preview)",
-                opacity=0.4,
-            )
-            self._log("SAM2 preview complete.")
+            try:
+                if mask is None:
+                    self._log("SAM2 preview failed.")
+                    return
+                if self._mask_layer is not None:
+                    try:
+                        self.viewer.layers.remove(self._mask_layer)
+                    except Exception:
+                        pass
+                self._mask_layer = self.viewer.add_labels(
+                    mask.astype(np.int32), name="Bell mask (preview)",
+                    opacity=0.4,
+                )
+                self._log("SAM2 preview complete.")
+            finally:
+                _finish_preview()
 
         def _on_preview_error(exc_info):
-            self._log(f"SAM2 preview error: {exc_info[1]}")
+            self._log(f"SAM2 preview error: {_exc_message(exc_info)}")
+            _finish_preview()
 
         w.returned.connect(_on_preview_done)
         w.errored.connect(_on_preview_error)
@@ -1045,7 +1093,7 @@ class ProcessingTab(QWidget):
         self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self._on_cancel_reset()
-        msg = str(exc_info[1])
+        msg = _exc_message(exc_info)
         self._log(f"Pipeline error: {msg}")
         self.result_label.setText(f"Error: {msg}")
         self._error_title.setText("Pipeline error")

@@ -49,6 +49,30 @@ def get_output_root() -> Path:
     return _output_root_override if _output_root_override is not None else OUTPUTS_DIR
 
 
+# ── SAM2 / Hydra initialization ───────────────────────────────────────────────
+
+def init_sam2_hydra() -> None:
+    """Make SAM2's Hydra-based builders safe to call repeatedly in one process.
+
+    ``build_sam2`` / ``build_sam2_video_predictor`` call ``hydra.compose()``,
+    which asserts Hydra is initialized with SAM2's config module. That init runs
+    exactly once, in ``sam2/__init__.py`` at first import — but the import is
+    cached, so it does NOT re-run on later builds. A plain
+    ``GlobalHydra.instance().clear()`` (the previous approach) therefore left
+    Hydra *uninitialized* on the 2nd+ build in a process (e.g. re-marking the
+    bell, or running the pipeline after a SAM2 preview), raising
+    "GlobalHydra is not initialized".
+
+    Clearing and then explicitly re-initializing guarantees a valid, fresh
+    Hydra state before every build, regardless of import caching or whatever
+    prior Hydra state exists.
+    """
+    from hydra.core.global_hydra import GlobalHydra
+    from hydra import initialize_config_module
+    GlobalHydra.instance().clear()
+    initialize_config_module("sam2", version_base="1.2")
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _stem(video_path: Path) -> str:
@@ -119,12 +143,11 @@ def _run_sam2_task(
 
     from sam2.build_sam import build_sam2_video_predictor
     from config import SAM2_CONFIG
-    # Clear Hydra's global state before building the predictor.
-    # The SAM2 preview (build_sam2 for single-frame annotation) initialises Hydra
-    # in the same process; calling build_sam2_video_predictor afterwards without
-    # clearing it raises HydraException: "GlobalHydra is already initialized".
-    from hydra.core.global_hydra import GlobalHydra
-    GlobalHydra.instance().clear()
+    # Initialize Hydra for SAM2's compose()-based builder. Must clear AND
+    # re-initialize (not just clear) so this works on the 2nd+ build in a
+    # process — e.g. after a SAM2 preview, or another queued video — since
+    # sam2's one-time import init does not re-run. See init_sam2_hydra().
+    init_sam2_hydra()
 
     device    = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     overrides = [f"++model.image_size={image_size}"] if image_size else []
