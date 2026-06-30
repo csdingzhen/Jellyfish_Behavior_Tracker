@@ -45,8 +45,10 @@ negligible.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -102,6 +104,166 @@ class PipelineResult:
             for name, err in self.errors.items():
                 lines.append(f"  {name}: {err.splitlines()[0]}")
         return "\n".join(lines)
+
+
+# ── Provenance log ────────────────────────────────────────────────────────────
+
+def _write_run_log(
+    video_path: Path,
+    calib_path: Path,
+    result:     PipelineResult,
+    *,
+    wall_s:     float,
+    config:     dict,
+) -> Path:
+    """Append a config + timing record to ``<run_dir>/<stem>_run_log.json``.
+
+    Written by both the CLI and the UI (run_pipeline is the single shared
+    entry point), so every run — successful or not — leaves a provenance
+    trail. Records accumulate as a JSON list across re-runs of the same video.
+    """
+    from .resources import HARDWARE
+
+    stem     = video_path.stem
+    log_path = run_dir(video_path) / f"{stem}_run_log.json"
+
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "video":     video_path.name,
+        "calib":     calib_path.name if calib_path else None,
+        "config":    config,
+        "hardware": {
+            "gpu":                HARDWARE.gpu_name,
+            "vram_gb":            round(HARDWARE.gpu_vram_gb, 1),
+            "max_gpu_concurrent": HARDWARE.max_gpu_concurrent,
+        },
+        "task_timing": {
+            name: {
+                "status":    result.task_status.get(name, "-"),
+                "elapsed_s": round(result.task_elapsed.get(name, 0.0), 1),
+            }
+            for name in result.task_status
+        },
+        "total_wall_s": round(wall_s, 1),
+        "success":      result.success,
+        "cancelled":    result.cancelled,
+        "errors":       {k: v.splitlines()[0] for k, v in result.errors.items()},
+    }
+
+    runs = []
+    if log_path.exists():
+        try:
+            runs = json.loads(log_path.read_text())
+        except (json.JSONDecodeError, ValueError):
+            runs = []
+    runs.append(entry)
+    log_path.write_text(json.dumps(runs, indent=2))
+    return log_path
+
+
+def _git_short_sha() -> str:
+    """Best-effort current commit short SHA for provenance; 'unknown' if unavailable."""
+    try:
+        import subprocess
+        sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(Path(__file__).parent.parent),
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        return sha or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _write_summary(
+    video_path: Path,
+    calib_path: Path,
+    result:     PipelineResult,
+    config:     dict,
+) -> Path:
+    """Write a per-video ``<stem>_summary.json`` manifest.
+
+    One machine-readable "read me first" file per recording, combining
+    recording metadata + params + provenance + the scientific results
+    (pulse count, confident fraction, per-rhopalium firing histogram,
+    dominant initiator). Downstream analysis and the batch table read this
+    rather than re-parsing the initiation CSV each time.
+    """
+    import csv as _csv
+
+    stem         = video_path.stem
+    summary_path = run_dir(video_path) / f"{stem}_summary.json"
+
+    # Recording metadata
+    recording = {}
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        n   = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        w   = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        recording = {
+            "fps":        round(fps, 2),
+            "n_frames":   n,
+            "duration_s": round(n / fps, 2) if fps > 0 else None,
+            "width":      w,
+            "height":     h,
+        }
+    except Exception:
+        pass
+
+    # Scientific results — parsed from the initiation CSV. Firing histogram
+    # and dominant initiator use CONFIDENT pulses only (the scientifically
+    # valid set; see README "Known limitations").
+    stats = {
+        "n_pulses":            0,
+        "n_confident":         0,
+        "confident_fraction":  None,
+        "dominant_rhopalium":  None,
+        "firing_counts":       {},   # rhopalium_id -> count, confident pulses only
+    }
+    if result.initiation_csv and result.initiation_csv.exists():
+        try:
+            with open(result.initiation_csv) as f:
+                rows = list(_csv.DictReader(f))
+            confident = [r for r in rows if r.get("signal_confident") == "1"]
+            counts: dict[str, int] = {}
+            for r in confident:
+                rid = r.get("rhopalium_id")
+                if rid not in (None, ""):
+                    counts[str(rid)] = counts.get(str(rid), 0) + 1
+            dominant = max(counts, key=counts.get) if counts else None
+            stats = {
+                "n_pulses":           len(rows),
+                "n_confident":        len(confident),
+                "confident_fraction": round(len(confident) / len(rows), 3) if rows else None,
+                "dominant_rhopalium": int(dominant) if dominant is not None else None,
+                "firing_counts":      counts,
+            }
+        except Exception:
+            pass
+
+    summary = {
+        "video":            video_path.name,
+        "stem":             stem,
+        "generated":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "pipeline_version": _git_short_sha(),
+        "success":          result.success,
+        "calibration":      calib_path.name if calib_path else None,
+        "recording":        recording,
+        "config":           config,
+        "results":          stats,
+        "outputs": {
+            "initiation_csv":  result.initiation_csv.name  if result.initiation_csv  else None,
+            "initiation_plot": result.initiation_plot.name if result.initiation_plot else None,
+            "annotated_video": result.annotated_video.name if result.annotated_video else None,
+            "run_log":         f"{stem}_run_log.json",
+        },
+    }
+    summary_path.write_text(json.dumps(summary, indent=2))
+    return summary_path
 
 
 # ── Main entry point ──────────────────────────────────────────────────────────
@@ -195,7 +357,7 @@ def run_pipeline(
     def _maybe(p: Path) -> Path | None:
         return p if p.exists() else None
 
-    return PipelineResult(
+    result = PipelineResult(
         seg_csv         = _maybe(rdir / f"{stem}_seg.csv"),
         contour_npy     = _maybe(rdir / f"{stem}_contour_radii.npy"),
         track_csv       = _maybe(rdir / f"{stem}_track.csv"),
@@ -210,3 +372,31 @@ def run_pipeline(
         errors          = snap.errors,
         cancelled       = snap.is_cancelled,
     )
+
+    # Provenance — written for BOTH CLI and UI runs (the UI previously had
+    # none). run_log.json accumulates every run; summary.json is the single
+    # latest manifest (metadata + params + results). Never let these break
+    # the run itself.
+    config = {
+        "sam2_stride":      stride,
+        "cotracker_stride": ct_stride,
+        "image_size_px":    image_size,
+        "window_size":      window_size,
+        "inner_frac":       inner_frac,
+        "outer_frac":       outer_frac,
+        "pre_window":       pre_window,
+        "min_distance_s":   min_distance,
+        "prominence":       prominence,
+        "save_n_masks":     save_n_masks,
+        "gpu_approach_b":   use_gpu_approach_b,
+    }
+    try:
+        _write_run_log(video_path, calib_path, result, wall_s=elapsed, config=config)
+    except Exception:
+        pass
+    try:
+        _write_summary(video_path, calib_path, result, config)
+    except Exception:
+        pass
+
+    return result

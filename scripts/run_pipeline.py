@@ -17,19 +17,16 @@ The script prints a live progress table while the pipeline runs.
 """
 
 import argparse
-import json
 import sys
 import threading
 import time
-from datetime import datetime
 from pathlib import Path
 
 import cv2
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config import OUTPUTS_DIR
-from src.pipeline import PipelineResult, run_pipeline
+from src.pipeline import run_pipeline
 from src.scheduler import ProgressEvent, TaskStatus
 from src.resources import HARDWARE
 
@@ -197,74 +194,6 @@ def collect_clicks(video_path: Path) -> tuple[tuple[int, int], tuple[int, int]] 
     return bell_click, dye_click
 
 
-# ── Run log ───────────────────────────────────────────────────────────────────
-
-def write_run_log(
-    video_path:  Path,
-    calib_path:  Path,
-    args,
-    wall_s:      float,
-    result:      PipelineResult,
-) -> Path:
-    """
-    Write a JSON log of config + timing to <output_dir>/<stem>/<stem>_run_log.json.
-    Appends to a list so multiple runs of the same video accumulate in one file.
-    Returns the log file path.
-    """
-    stem    = video_path.stem
-    log_dir = OUTPUTS_DIR / stem
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{stem}_run_log.json"
-
-    entry = {
-        "timestamp":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "video":      video_path.name,
-        "calib":      calib_path.name,
-        "config": {
-            "sam2_stride":       args.stride,
-            "cotracker_stride":  args.cotracker_stride,
-            "image_size_px":     args.image_size,
-            "window_size":       args.window_size,
-            "inner_frac":        args.inner_frac,
-            "outer_frac":        args.outer_frac,
-            "pre_window":        args.pre_window,
-            "min_distance_s":    args.min_distance,
-            "prominence":        args.prominence,
-            "save_n_masks":      args.save_n_masks,
-            "gpu_approach_b":    not args.no_gpu_approach_b,
-        },
-        "hardware": {
-            "gpu":               HARDWARE.gpu_name,
-            "vram_gb":           round(HARDWARE.gpu_vram_gb, 1),
-            "max_gpu_concurrent": HARDWARE.max_gpu_concurrent,
-        },
-        "task_timing": {
-            name: {
-                "status":      result.task_status.get(name, "-"),
-                "elapsed_s":   round(result.task_elapsed.get(name, 0.0), 1),
-                "elapsed_str": _fmt_time(result.task_elapsed.get(name, 0.0)),
-            }
-            for name in result.task_status
-        },
-        "total_wall_s":   round(wall_s, 1),
-        "total_wall_str": _fmt_time(wall_s),
-        "success":        result.success,
-        "cancelled":      result.cancelled,
-        "errors":         {k: v.splitlines()[0] for k, v in result.errors.items()},
-    }
-
-    # Load existing runs, append, write back
-    runs = []
-    if log_path.exists():
-        try:
-            runs = json.loads(log_path.read_text())
-        except (json.JSONDecodeError, ValueError):
-            runs = []
-    runs.append(entry)
-    log_path.write_text(json.dumps(runs, indent=2))
-    return log_path
-
-
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -378,7 +307,9 @@ def main() -> None:
     print(f"\n  Total wall-clock: {_fmt_time(wall)}")
     print(f"{'='*60}")
 
-    log_path = write_run_log(video_path, calib_path, args, wall, result)
+    # run_pipeline() now writes the provenance log itself (shared by CLI + UI).
+    from src.tasks import run_dir
+    log_path = run_dir(video_path) / f"{video_path.stem}_run_log.json"
     print(f"\n  Run log: {log_path}")
 
     if result.success:

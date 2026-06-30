@@ -347,29 +347,33 @@ All outputs for a recording land in their own subfolder:
 ```text
 outputs\
   <stem>\
-    <stem>_frames\               TEMP: JPEG frames for SAM2, auto-deleted after use
-    <stem>_masks\                20 sample PNG masks for visual spot-check
-    <stem>_seg.csv               Bell centre + radius per frame  (SAM2)
-    <stem>_contour_radii.npy     Bell boundary r(θ, t)  (SAM2)
-    <stem>_track.csv             Dye mark position per frame  (CoTracker)
-    <stem>_tracked.mp4           Dye mark overlay video
-    <stem>_margin_diff_lab.npy   TEMP: lab-frame margin diff (deleted after Phase 1b)
-    <stem>_margin_diff.npy       Body-frame margin activity cache  (Approach B)
-    <stem>_initiation_b.csv      Per-pulse rhopalium assignments
-    <stem>_initiation_b_plot.png Activity signal + firing histogram
-    <stem>_initiation_b_annotated.mp4  Full video with pulse labels
-    <stem>_spacetime_pulse_b\    Per-pulse angle × time heatmaps
-      pulse_000.png
-      pulse_001.png
-      ...
-    <stem>_annotated.mp4         Validation video (dye + centroid overlay)
-    <stem>_sam2_validation.png   SAM2 segmentation spot-check
-    <stem>_run_log.json          Config and timing for every run (appends)
+    # ── Results ──────────────────────────────────────────────
+    <stem>_initiation_b.csv            Per-pulse rhopalium assignments
+    <stem>_initiation_b_plot.png       Activity signal + firing histogram
+    <stem>_initiation_b_annotated.mp4  Annotated video (first 60 s)
+    # ── Intermediate data (reused on re-runs / re-analysis) ──
+    <stem>_seg.csv                     Bell centre + radius per frame  (SAM2)
+    <stem>_contour_radii.npy           Bell boundary r(θ, t)  (SAM2)
+    <stem>_track.csv                   Dye mark position per frame  (CoTracker)
+    <stem>_margin_diff_lab.npy         Lab-frame margin diff (kept as cache for body-frame stage)
+    <stem>_margin_diff.npy             Body-frame margin activity cache  (Approach B)
+    # ── QC / diagnostics ─────────────────────────────────────
+    <stem>_tracked.mp4                 Dye mark overlay video
+    <stem>_masks\                      20 sample PNG masks for visual spot-check
+    # ── State / provenance ───────────────────────────────────
+    <stem>_sam2.complete               Checkpoint sentinel (SAM2 stage finished)
+    <stem>_cotrack.complete            Checkpoint sentinel (CoTracker stage finished)
+    <stem>_run_log.json                Config + timing for every run (appended; CLI and UI)
 
 calibration\
   <animal>.json                  Rhopalium body-frame angles  (permanent record)
   <animal>_annotated.png         Labelled calibration diagram
 ```
+
+> Note: the SAM2 frame-extraction is streamed, so no `<stem>_frames/` directory
+> is created. `<stem>_margin_diff_lab.npy` is retained (not deleted) because the
+> body-frame stage's checkpoint depends on it; it will move into a per-video
+> cache subfolder when the project-scoped output layout lands.
 
 ---
 

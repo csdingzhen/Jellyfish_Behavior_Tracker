@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _ICON = Path(__file__).parent.parent / "assets" / "app_icon.svg"
+_REPO_URL = "https://github.com/csdingzhen/Jellyfish_Behavior_Tracker"
 
 # Windows: set the App User Model ID before QApplication is created so the
 # taskbar groups this process under our own icon rather than Python's.
@@ -30,6 +31,81 @@ def _simplify_viewer(viewer) -> None:
         for dock in viewer.window._qt_window.findChildren(QDockWidget):
             if dock.objectName() in hide_names:
                 dock.hide()
+    except Exception:
+        pass  # graceful fallback if napari internals change
+
+
+def _setup_menu(viewer) -> None:
+    """Replace napari's default menu bar with a minimal, app-relevant one.
+
+    napari's stock menus (File/View/Layers/Plugins/Window/Help) expose
+    layer, plugin, and preferences actions that don't map to this app and
+    only create ambiguity. We clear them and add a small set of entries
+    that are actually useful here.
+    """
+    try:
+        from qtpy.QtWidgets import QAction, QMessageBox
+        from qtpy.QtGui import QDesktopServices
+        from qtpy.QtCore import QUrl
+
+        win  = viewer.window._qt_window
+        root = Path(__file__).parent.parent
+
+        def _open(path: Path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+        def _open_url(url: str):
+            QDesktopServices.openUrl(QUrl(url))
+
+        mb = win.menuBar()
+        mb.clear()
+
+        # ── File ──────────────────────────────────────────────────────────
+        file_menu = mb.addMenu("&File")
+
+        act_outputs = QAction("Open Outputs Folder", win)
+        def _open_outputs():
+            from src.tasks import get_output_root
+            d = get_output_root()
+            d.mkdir(parents=True, exist_ok=True)
+            _open(d)
+        act_outputs.triggered.connect(_open_outputs)
+        file_menu.addAction(act_outputs)
+
+        act_projects = QAction("Open Projects Folder", win)
+        act_projects.triggered.connect(lambda: _open(root / "project_folder"))
+        file_menu.addAction(act_projects)
+
+        file_menu.addSeparator()
+        act_quit = QAction("Quit", win)
+        act_quit.setShortcut("Ctrl+Q")
+        act_quit.triggered.connect(win.close)
+        file_menu.addAction(act_quit)
+
+        # ── Help ──────────────────────────────────────────────────────────
+        help_menu = mb.addMenu("&Help")
+
+        act_guide = QAction("UI Guide", win)
+        act_guide.triggered.connect(
+            lambda: _open_url(f"{_REPO_URL}/blob/main/UI_GUIDE.md")
+        )
+        help_menu.addAction(act_guide)
+
+        act_readme = QAction("README (GitHub)", win)
+        act_readme.triggered.connect(lambda: _open_url(_REPO_URL))
+        help_menu.addAction(act_readme)
+
+        help_menu.addSeparator()
+        act_about = QAction("About", win)
+        act_about.triggered.connect(lambda: QMessageBox.about(
+            win, "About Cassiopea Pipeline",
+            "<b>Cassiopea Behavior Analysis Pipeline</b><br><br>"
+            "Bell orientation, contraction timing, and pulse-initiation "
+            "analysis for top-view <i>Cassiopea</i> recordings.<br><br>"
+            "License: MIT<br>"
+            f'<a href="{_REPO_URL}">{_REPO_URL}</a>'
+        ))
+        help_menu.addAction(act_about)
     except Exception:
         pass  # graceful fallback if napari internals change
 
@@ -61,6 +137,7 @@ def main():
 
     viewer = napari.Viewer(title="Cassiopea Pipeline")
     _simplify_viewer(viewer)
+    _setup_menu(viewer)
 
     if _ICON.exists():
         icon = _make_icon(_ICON)
