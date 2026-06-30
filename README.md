@@ -176,6 +176,16 @@ VIDEO_DIR = Path(r"C:\Users\YourName\Videos\Cassiopea")
 
 A napari-based desktop application covers both calibration and video processing without the command line.
 
+**Double-click `Cassiopea Pipeline.exe`** in the project folder. It's a small
+(~7 MB) launcher with the app icon — no console window, just a loading splash
+then the main window, and it can be pinned to the taskbar. `setup.ps1` builds it
+automatically; rebuild any time with `.\packaging\build_launcher.ps1`. It starts
+the UI through the venv (so keep it next to `venv\` and `scripts\`); it does
+**not** bundle Python/torch.
+
+To launch from a terminal instead — useful for seeing startup errors, since the
+`.exe` shows no console:
+
 ```powershell
 .\venv\Scripts\python scripts\run_ui.py
 ```
@@ -424,6 +434,11 @@ ui\
   workers.py       Background thread worker and progress relay
   parameters.py    PipelineParams dataclass
   thumbnails.py    Video thumbnail cache helper
+
+packaging\
+  launcher.py        Source for the no-console launcher .exe
+  make_ico.py        Generate assets/app_icon.ico from the SVG
+  build_launcher.ps1 Build "Cassiopea Pipeline.exe" (PyInstaller)
 
 calibration\      Rhopalium calibration files (tracked in git)
 data\             Short test clips (gitignored)

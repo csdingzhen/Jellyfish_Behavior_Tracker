@@ -1,7 +1,7 @@
 # Cassiopea Pipeline — UI Guide
 
 A napari-based interface for analysing *Cassiopea* jellyfish behaviour from top-view video recordings.  
-Launch with: `venv\Scripts\python scripts\run_ui.py`
+Launch by double-clicking **`Cassiopea Pipeline.exe`** (built by `setup.ps1`), or run `venv\Scripts\python scripts\run_ui.py` from a terminal.
 
 ---
 

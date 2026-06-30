@@ -74,7 +74,13 @@ You can leave all other paths at their defaults unless you are storing model wei
 
 ## Step 4 — Verify the installation
 
-Launch the graphical interface:
+Launch the graphical interface by **double-clicking `Cassiopea Pipeline.exe`**
+in the project folder — `setup.ps1` builds this launcher automatically (no
+console window, app icon, pinnable). If it's missing, rebuild it with
+`.\packaging\build_launcher.ps1`.
+
+To see startup errors (the `.exe` shows no console), launch from a terminal
+instead:
 
 ```powershell
 .\venv\Scripts\python scripts\run_ui.py
@@ -241,12 +247,14 @@ Or alternatively:
 | Path | In git | Notes |
 | --- | --- | --- |
 | `src/`, `ui/`, `scripts/` | Yes | All source code |
+| `packaging/` | Yes | Launcher source + build script for the `.exe` |
 | `calibration/*.json` | Yes | Rhopalium calibration files — do not delete |
 | `requirements.txt`, `setup.ps1` | Yes | Dependency management |
 | `config.py` | Yes | Defaults only; your `VIDEO_DIR` is a local edit |
+| `Cassiopea Pipeline.exe` | No (.gitignore) | Built by setup.ps1 / build_launcher.ps1 |
 | `weights/` | No (.gitignore) | Downloaded by setup.ps1 |
 | `outputs/` | No (.gitignore) | Pipeline results; can be regenerated |
 | `data/` | No (.gitignore) | Raw video clips |
 | `venv/` | No (.gitignore) | Virtual environment |
-| `assets/` | Yes | Resource related to UI |
+| `assets/` | Yes | UI resources (icon SVG + generated `.ico`) |
 | `docs/` | Yes | Knowledge base for developer or LLM agents |

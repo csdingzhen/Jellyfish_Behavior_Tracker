@@ -68,4 +68,30 @@ if (-not (Test-Path "$WeightsDir\cotracker\scaled_offline.pth")) {
 Write-Host "`nRunning CUDA smoke test..." -ForegroundColor Cyan
 & $Python scripts\test_cuda.py
 
+# ── 9. Build the desktop launcher (Cassiopea Pipeline.exe) ───────────────────
+# Produces a small no-console launcher with the app icon. Non-fatal: if it
+# fails you can still launch from a terminal, and rebuild later with
+# packaging\build_launcher.ps1.
+Write-Host "`nBuilding the desktop launcher..." -ForegroundColor Cyan
+try {
+    & $Python -m pip install pyinstaller
+    & $Python packaging\make_ico.py
+    & $Python -m PyInstaller --onefile --windowed --noconfirm --clean `
+        --name "Cassiopea Pipeline" `
+        --icon "$PWD\assets\app_icon.ico" `
+        --distpath "$PWD" `
+        --workpath "$PWD\build\pyinstaller" `
+        --specpath "$PWD\build" `
+        "$PWD\packaging\launcher.py"
+    if (Test-Path ".\Cassiopea Pipeline.exe") {
+        Write-Host "  Launcher built: Cassiopea Pipeline.exe" -ForegroundColor Green
+    } else {
+        Write-Host "  Launcher build did not produce the .exe (non-fatal)." -ForegroundColor Yellow
+    }
+} catch {
+    Write-Host "  Launcher build skipped (non-fatal): $_" -ForegroundColor Yellow
+    Write-Host "  You can still launch with: .\venv\Scripts\python scripts\run_ui.py" -ForegroundColor Yellow
+}
+
 Write-Host "`nSetup complete." -ForegroundColor Green
+Write-Host "Launch the app by double-clicking 'Cassiopea Pipeline.exe'." -ForegroundColor Green

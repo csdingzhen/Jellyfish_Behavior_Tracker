@@ -13,14 +13,28 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _ICON = Path(__file__).parent.parent / "assets" / "app_icon.svg"
 _REPO_URL = "https://github.com/csdingzhen/Jellyfish_Behavior_Tracker"
+_APP_ID   = "Jellyfish.Cassiopea.1"
 
-# Windows: set the App User Model ID before QApplication is created so the
-# taskbar groups this process under our own icon rather than Python's.
-if sys.platform == "win32":
-    import ctypes
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-        "Jellyfish.Cassiopea.1"
-    )
+
+def _set_windows_app_id():
+    """Set this process's AppUserModelID so the Windows taskbar groups it under
+    our own identity (and icon) rather than python.exe's.
+
+    napari sets its OWN app id ('napari.napari.viewer.<ver>') when it creates the
+    QApplication, which would override ours — so this is called again after the
+    viewer is built to make sure ours is the one in effect when the taskbar
+    button is created.
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(_APP_ID)
+        except Exception:
+            pass
+
+
+# Set it early too (before any QApplication / window exists).
+_set_windows_app_id()
 
 
 def _simplify_viewer(viewer) -> None:
@@ -127,22 +141,91 @@ def _make_icon(svg_path: Path):
     return icon
 
 
+def _make_splash_pixmap():
+    """Branded loading splash shown while napari/torch import and the viewer
+    builds — fills the otherwise-blank startup wait."""
+    from qtpy.QtCore import Qt, QRectF
+    from qtpy.QtGui import QPixmap, QColor, QPainter, QFont
+
+    W, H = 440, 240
+    px = QPixmap(W, H)
+    px.fill(QColor("#262930"))
+    p = QPainter(px)
+    p.setRenderHint(QPainter.Antialiasing)
+    try:
+        from qtpy.QtSvg import QSvgRenderer
+        if _ICON.exists():
+            QSvgRenderer(str(_ICON)).render(p, QRectF((W - 72) / 2, 38, 72, 72))
+    except Exception:
+        pass
+    p.setPen(QColor("#e0e0e0"))
+    f = QFont(); f.setPointSize(15); f.setBold(True); p.setFont(f)
+    p.drawText(px.rect().adjusted(0, 124, 0, 0),
+               Qt.AlignHCenter | Qt.AlignTop, "Cassiopea Pipeline")
+    f.setPointSize(9); f.setBold(False); p.setFont(f)
+    p.setPen(QColor("#777777"))
+    p.drawText(px.rect().adjusted(0, 162, 0, 0),
+               Qt.AlignHCenter | Qt.AlignTop, "Loading…")
+    p.end()
+    return px
+
+
+def _show_splash(app):
+    """Show the loading splash. Returns the QSplashScreen, or None on failure."""
+    try:
+        from qtpy.QtWidgets import QSplashScreen
+        sp = QSplashScreen(_make_splash_pixmap())
+        sp.show()
+        app.processEvents()
+        return sp
+    except Exception:
+        return None
+
+
 def main():
+    import sys
+    from qtpy.QtCore import Qt
+    from qtpy.QtWidgets import QApplication
+
+    # Create the Qt app up front (with the high-DPI attributes napari would
+    # otherwise set) so a splash can be shown during the heavy napari/torch
+    # import and viewer construction below. napari reuses this app instance.
+    for _attr in ("AA_EnableHighDpiScaling", "AA_UseHighDpiPixmaps"):
+        _a = getattr(Qt, _attr, None)
+        if _a is not None:
+            try:
+                QApplication.setAttribute(_a, True)
+            except Exception:
+                pass
+    app = QApplication.instance() or QApplication(sys.argv)
+
+    # Set OUR icon on the app *before* napari builds. napari only stamps its own
+    # icon when the app's windowIcon is still null (see get_qapp), so setting
+    # ours first makes it leave ours alone.
+    app_icon = _make_icon(_ICON) if _ICON.exists() else None
+    if app_icon is not None:
+        app.setWindowIcon(app_icon)
+
+    splash = _show_splash(app)
+
     import threading
     import napari
-    from qtpy.QtWidgets import QApplication
     from .widget import CassiopeaWidget
     from .sidebar import VideoSidebarWidget
     from .project import extract_continuity_clicks
 
-    viewer = napari.Viewer(title="Cassiopea Pipeline")
+    # Build the viewer HIDDEN, assemble all docks + styling, then reveal it —
+    # so the window never flashes napari's default unstyled state first.
+    viewer = napari.Viewer(title="Cassiopea Pipeline", show=False)
+    try:
+        viewer.theme = "dark"
+    except Exception:
+        pass
     _simplify_viewer(viewer)
     _setup_menu(viewer)
 
-    if _ICON.exists():
-        icon = _make_icon(_ICON)
-        QApplication.instance().setWindowIcon(icon)
-        viewer.window._qt_window.setWindowIcon(icon)
+    if app_icon is not None:
+        viewer.window._qt_window.setWindowIcon(app_icon)
 
     # Right dock — main workflow tabs + hardware panel
     widget = CassiopeaWidget(viewer)
@@ -337,6 +420,24 @@ def main():
         worker.start()
 
     sidebar.queue_start.connect(_start_queued_video)
+
+    # Reveal the fully-assembled, dark-themed window and dismiss the splash.
+    # Re-assert our taskbar identity + icon right before first show: napari may
+    # have changed the app id during get_qapp, and the taskbar latches the icon
+    # when the window first becomes visible.
+    win = viewer.window._qt_window
+    _set_windows_app_id()
+    if app_icon is not None:
+        app.setWindowIcon(app_icon)
+        win.setWindowIcon(app_icon)
+    win.show()
+    win.raise_()
+    win.activateWindow()
+    if splash is not None:
+        try:
+            splash.finish(win)
+        except Exception:
+            pass
 
     napari.run()
 

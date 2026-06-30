@@ -24,6 +24,10 @@ __pycache__/
 dist/
 build/
 
+# PyInstaller launcher build output (rebuild with packaging/build_launcher.ps1)
+/Cassiopea Pipeline.exe
+*.spec
+
 # Video and image data — keep out of git (use VIDEO_DIR in config.py instead)
 data/*.mp4
 data/*.avi
