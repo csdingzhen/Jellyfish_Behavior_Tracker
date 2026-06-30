@@ -167,8 +167,11 @@ def main():
     # Clicking a video in sidebar → load into viewer
     sidebar.video_selected.connect(widget.on_video_selected)
 
-    # Project opened/created → load video folder into sidebar + notify process tab
+    # Project opened/created → scope outputs under the project name, load its
+    # video folder into the sidebar, and notify the process tab.
     def _on_project_changed(state):
+        from src.tasks import set_project_subdir
+        set_project_subdir(state.name)   # outputs now go to <base>/<project>/
         if state.video_folder:
             sidebar.load_folder(Path(state.video_folder))
 

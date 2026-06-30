@@ -117,16 +117,20 @@ When the pipeline finishes:
 
 ### Output files
 
-All outputs are written to `outputs/<video_stem>/`:
+With a project named `proj1` active, outputs are grouped under
+`outputs/proj1/`, one subfolder per video, with project-level summaries
+alongside. (No project open → outputs go straight to `outputs/<video_stem>/`.)
+Open the active output folder any time via **File → Open Outputs Folder**.
 
-| File | Contents |
-|------|---------|
-| `<stem>_seg.csv` | Per-frame bell centroid (cx, cy) and radius |
-| `<stem>_track.csv` | Per-frame dye mark position (x, y) |
-| `<stem>_initiation_b.csv` | Per-pulse: peak frame, timestamp, activity, init angle, rhopalium ID, angular distance |
-| `<stem>_initiation_b_plot.png` | Summary figure (signal trace + polar initiation map) |
-| `<stem>_initiation_b_annotated.mp4` | Annotated video with centroid, dye axis, and initiation overlay |
-| `<stem>_run_log.json` | Config and timing for every run (appends, never overwrites) |
+| File                                  | Location             | Contents                                                                               |
+| ------------------------------------- | -------------------- | -------------------------------------------------------------------------------------- |
+| `videos.csv`                          | `outputs/<project>/` | One row per recording: pulse count, confident %, dominant rhopalium                    |
+| `<stem>_summary.json`                 | per-video folder     | Metadata + params + provenance + results (read-me-first manifest)                      |
+| `<stem>_initiation_b.csv`             | per-video folder     | Per-pulse: peak frame, timestamp, activity, init angle, rhopalium ID, angular distance |
+| `<stem>_initiation_b_plot.png`        | per-video folder     | Summary figure (signal trace + polar initiation map)                                   |
+| `<stem>_initiation_b_annotated.mp4`   | per-video folder     | Annotated video with centroid, dye axis, and initiation overlay                        |
+| `<stem>_seg.csv` / `<stem>_track.csv` | per-video folder     | Per-frame bell centroid+radius / dye position                                          |
+| `<stem>_run_log.json`                 | per-video folder     | Config + timing for every run (appends, never overwrites)                              |
 
 ---
 

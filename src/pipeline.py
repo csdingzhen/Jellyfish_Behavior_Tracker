@@ -266,6 +266,57 @@ def _write_summary(
     return summary_path
 
 
+def _write_videos_table(output_root: Path) -> Path | None:
+    """Refresh ``<output_root>/videos.csv`` — one row per processed recording,
+    aggregated from each video subfolder's ``<stem>_summary.json``.
+
+    Regenerated from scratch on every call so it always reflects the current
+    set of processed videos (and self-heals if a summary changes). One row per
+    video keeps it small even for a 24×1-hour batch — we deliberately do NOT
+    aggregate every pulse into one giant table. Lives at the project root when
+    a project is active (``outputs/<project>/videos.csv``), else under the base.
+    """
+    import csv as _csv
+
+    if not output_root.exists():
+        return None
+
+    rows = []
+    for sub in sorted(p for p in output_root.iterdir() if p.is_dir()):
+        sjson = sub / f"{sub.name}_summary.json"
+        if not sjson.exists():
+            continue
+        try:
+            s = json.loads(sjson.read_text())
+        except Exception:
+            continue
+        rec = s.get("recording", {}) or {}
+        res = s.get("results", {}) or {}
+        rows.append({
+            "stem":               s.get("stem", sub.name),
+            "video":              s.get("video", ""),
+            "duration_s":         rec.get("duration_s"),
+            "fps":                rec.get("fps"),
+            "n_pulses":           res.get("n_pulses"),
+            "n_confident":        res.get("n_confident"),
+            "confident_fraction": res.get("confident_fraction"),
+            "dominant_rhopalium": res.get("dominant_rhopalium"),
+            "calibration":        s.get("calibration"),
+            "generated":          s.get("generated"),
+            "success":            s.get("success"),
+        })
+
+    if not rows:
+        return None
+
+    table_path = output_root / "videos.csv"
+    with open(table_path, "w", newline="") as f:
+        w = _csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        w.writeheader()
+        w.writerows(rows)
+    return table_path
+
+
 # ── Main entry point ──────────────────────────────────────────────────────────
 
 def run_pipeline(
@@ -396,6 +447,10 @@ def run_pipeline(
         pass
     try:
         _write_summary(video_path, calib_path, result, config)
+    except Exception:
+        pass
+    try:
+        _write_videos_table(get_output_root())
     except Exception:
         pass
 

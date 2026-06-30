@@ -35,18 +35,53 @@ from config import OUTPUTS_DIR, SAM2_WEIGHTS, COTRACKER_WEIGHTS
 
 
 # ── Output directory (runtime override) ──────────────────────────────────────
+#
+# Two layers compose the output root:
+#   base           — the user-chosen output directory (set_output_root), default
+#                    OUTPUTS_DIR from config.py.
+#   project subdir — the active project's name (set_project_subdir). When set,
+#                    all outputs live under <base>/<project>/ so a project's
+#                    recordings are grouped together and project-level summaries
+#                    (videos.csv) sit alongside the per-video folders.
+#
+# With no project active the subdir is None and outputs go straight under base
+# (the historical layout), so non-project / ad-hoc runs are unaffected.
 
 _output_root_override: Path | None = None
+_project_subdir:       str  | None = None
+
+
+def _safe_name(name: str) -> str:
+    """Sanitize a project name into a filesystem-safe folder name."""
+    bad = r'\/:*?"<>|'
+    return ("".join("_" if c in bad else c for c in name).strip()) or "Untitled"
 
 
 def set_output_root(path: Path | None) -> None:
-    """Override the output directory at runtime (called by the UI)."""
+    """Override the base output directory at runtime (called by the UI)."""
     global _output_root_override
     _output_root_override = path
 
 
-def get_output_root() -> Path:
+def set_project_subdir(name: str | None) -> None:
+    """Set the active project name as an output subfolder (called by the UI).
+
+    Pass None (or empty) to clear it — outputs then go straight under the base.
+    """
+    global _project_subdir
+    _project_subdir = _safe_name(name) if name else None
+
+
+def get_output_base() -> Path:
+    """The base output directory, ignoring any project subfolder."""
     return _output_root_override if _output_root_override is not None else OUTPUTS_DIR
+
+
+def get_output_root() -> Path:
+    """The effective output root: ``<base>/<project>`` if a project is active,
+    else just ``<base>``."""
+    base = get_output_base()
+    return base / _project_subdir if _project_subdir else base
 
 
 # ── SAM2 / Hydra initialization ───────────────────────────────────────────────
