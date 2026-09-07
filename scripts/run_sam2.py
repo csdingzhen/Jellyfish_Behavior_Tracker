@@ -773,7 +773,7 @@ def main() -> None:
     from sam2.build_sam import build_sam2_video_predictor
     predictor = build_sam2_video_predictor(
         model_cfg, str(model_weights), device=device,
-        hydra_overrides_extra=overrides if overrides else None,
+        hydra_overrides_extra=overrides,
     )
     if device.type == "cuda":
         predictor.image_encoder = torch.compile(

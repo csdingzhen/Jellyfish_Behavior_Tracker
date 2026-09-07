@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 
@@ -86,6 +87,9 @@ def get_output_root() -> Path:
 
 # ── SAM2 / Hydra initialization ───────────────────────────────────────────────
 
+_SAM2_HYDRA_LOCK = threading.RLock()
+
+
 def init_sam2_hydra() -> None:
     """Make SAM2's Hydra-based builders safe to call repeatedly in one process.
 
@@ -106,6 +110,25 @@ def init_sam2_hydra() -> None:
     from hydra import initialize_config_module
     GlobalHydra.instance().clear()
     initialize_config_module("sam2", version_base="1.2")
+
+
+@contextmanager
+def sam2_hydra_build():
+    """Serialize SAM2 model construction through Hydra's global singleton.
+
+    The UI preview and pipeline run on different worker threads. Both SAM2
+    builders use Hydra's process-global state, so clear/initialize/compose must
+    be atomic across those threads. Hydra is cleared as soon as the model has
+    been constructed.
+    """
+    from hydra.core.global_hydra import GlobalHydra
+
+    with _SAM2_HYDRA_LOCK:
+        init_sam2_hydra()
+        try:
+            yield
+        finally:
+            GlobalHydra.instance().clear()
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -178,18 +201,13 @@ def _run_sam2_task(
 
     from sam2.build_sam import build_sam2_video_predictor
     from config import SAM2_CONFIG
-    # Initialize Hydra for SAM2's compose()-based builder. Must clear AND
-    # re-initialize (not just clear) so this works on the 2nd+ build in a
-    # process — e.g. after a SAM2 preview, or another queued video — since
-    # sam2's one-time import init does not re-run. See init_sam2_hydra().
-    init_sam2_hydra()
-
     device    = "cuda" if __import__("torch").cuda.is_available() else "cpu"
     overrides = [f"++model.image_size={image_size}"] if image_size else []
-    predictor = build_sam2_video_predictor(
-        SAM2_CONFIG, str(SAM2_WEIGHTS), device=device,
-        hydra_overrides_extra=overrides if overrides else None,
-    )
+    with sam2_hydra_build():
+        predictor = build_sam2_video_predictor(
+            SAM2_CONFIG, str(SAM2_WEIGHTS), device=device,
+            hydra_overrides_extra=overrides,
+        )
 
     seg_stats, contour_arr, dye_track_list = run_sam2_streaming(
         predictor, video_path, stride, bell_click, mask_dir,

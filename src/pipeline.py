@@ -102,7 +102,11 @@ class PipelineResult:
         if self.errors:
             lines.append("Errors:")
             for name, err in self.errors.items():
-                lines.append(f"  {name}: {err.splitlines()[0]}")
+                detail = next(
+                    (line.strip() for line in reversed(err.splitlines()) if line.strip()),
+                    "Unknown error",
+                )
+                lines.append(f"  {name}: {detail}")
         return "\n".join(lines)
 
 
@@ -147,7 +151,9 @@ def _write_run_log(
         "total_wall_s": round(wall_s, 1),
         "success":      result.success,
         "cancelled":    result.cancelled,
-        "errors":       {k: v.splitlines()[0] for k, v in result.errors.items()},
+        # Keep complete tracebacks; the old first-line-only value contained
+        # only "Traceback (most recent call last):" and hid the actual cause.
+        "errors":       dict(result.errors),
     }
 
     runs = []

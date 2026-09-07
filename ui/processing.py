@@ -793,6 +793,13 @@ class ProcessingTab(QWidget):
         if self._bell_click is None or self._video_path is None:
             return
 
+        # Avoid starting a preview GPU model while the full pipeline is active.
+        # Keep one pending preview, using the latest bell click after completion.
+        if self._worker is not None:
+            self._preview_pending = True
+            self._log("SAM2 preview queued until the pipeline finishes.")
+            return
+
         # Serialize previews. SAM2 builds its model through Hydra's global
         # singleton, and two preview workers running at once race on
         # GlobalHydra.instance().clear() → "GlobalHydra is not initialized".
@@ -805,6 +812,7 @@ class ProcessingTab(QWidget):
 
         bell = self._bell_click
         video_path = self._video_path
+        self.run_btn.setEnabled(False)
         self._log("SAM2 preview: running segmentation on frame 0…")
 
         from napari.qt.threading import thread_worker
@@ -823,13 +831,11 @@ class ProcessingTab(QWidget):
 
             from sam2.build_sam import build_sam2
             from sam2.sam2_image_predictor import SAM2ImagePredictor
-            from src.tasks import init_sam2_hydra
-            # Clear AND re-initialize Hydra. A plain clear() works only on the
-            # first preview; on re-mark the cached sam2 import doesn't re-run
-            # its one-time Hydra init, so compose() inside build_sam2 raises
-            # "GlobalHydra is not initialized". See init_sam2_hydra().
-            init_sam2_hydra()
-            sam2_model = build_sam2(SAM2_CONFIG, str(SAM2_WEIGHTS))
+            from src.tasks import sam2_hydra_build
+            # Use the same lock as the pipeline builder so preview and pipeline
+            # threads cannot clear or initialize Hydra underneath each other.
+            with sam2_hydra_build():
+                sam2_model = build_sam2(SAM2_CONFIG, str(SAM2_WEIGHTS))
             with torch.inference_mode():
                 img_predictor = SAM2ImagePredictor(sam2_model)
                 frame_rgb = cv.cvtColor(frame_bgr, cv.COLOR_BGR2RGB)
@@ -839,8 +845,6 @@ class ProcessingTab(QWidget):
                     point_labels=np.array([1]),
                     multimask_output=False,
                 )
-            from hydra.core.global_hydra import GlobalHydra
-            GlobalHydra.instance().clear()
             return masks[0].astype(np.uint8)
 
         w = _preview_worker()
@@ -852,6 +856,8 @@ class ProcessingTab(QWidget):
             if self._preview_pending:
                 self._preview_pending = False
                 self._run_sam2_preview()
+            elif self._worker is None:
+                self.run_btn.setEnabled(True)
 
         def _on_preview_done(mask):
             try:
@@ -911,6 +917,12 @@ class ProcessingTab(QWidget):
     # ── Run pipeline ──────────────────────────────────────────────────────────
 
     def _on_run(self):
+        if self._preview_worker is not None:
+            QMessageBox.information(
+                self, "SAM2 preview running",
+                "Wait for the SAM2 preview to finish before starting the pipeline.",
+            )
+            return
         if self._video_path is None:
             QMessageBox.warning(self, "No video",
                                 "Select a video from the sidebar first.")
@@ -1074,7 +1086,12 @@ class ProcessingTab(QWidget):
             )
 
     def _on_pipeline_done(self, result):
-        self.run_btn.setEnabled(True)
+        self._worker = None
+        if self._preview_pending:
+            self._preview_pending = False
+            self._run_sam2_preview()
+        else:
+            self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         if result.success:
             elapsed = (time.monotonic() - self._run_start_time
@@ -1090,7 +1107,12 @@ class ProcessingTab(QWidget):
             self.pipeline_finished.emit(self._video_path, None)
 
     def _on_pipeline_error(self, exc_info):
-        self.run_btn.setEnabled(True)
+        self._worker = None
+        if self._preview_pending:
+            self._preview_pending = False
+            self._run_sam2_preview()
+        else:
+            self.run_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
         self._on_cancel_reset()
         msg = _exc_message(exc_info)
